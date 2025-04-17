@@ -1,0 +1,40 @@
+# Node.js
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.*
+
+# Vite
+.vite
+
+# VSCode
+.vscode/
+
+# Misc
+*.local
+*.cache
+
+# Optional: Ignore coverage reports
+coverage/
+
+# Optional: Ignore IDE files
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
