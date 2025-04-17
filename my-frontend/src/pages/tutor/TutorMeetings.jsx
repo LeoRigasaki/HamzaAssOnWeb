@@ -115,7 +115,7 @@ const TutorMeetings = () => {
               <div>
                 <h5 className="mb-1">{session.subject}</h5>
                 <p className="mb-1">
-                  <strong>Student:</strong> {session.student.name}
+                  <strong>Student:</strong> {session.student && session.student.name ? session.student.name : (session.studentId || "Unknown")}
                 </p>
                 <p className="mb-1">
                   <strong>Date:</strong> {formatDate(session.date)}
@@ -158,16 +158,6 @@ const TutorMeetings = () => {
                       </button>
                     </>
                   )}
-                   {/* {session.status === "accepted" && (
-  <div className="btn-group">
-    <Link to={`/chat/${session.tutor._id}`} className="btn btn-primary btn-sm">
-      <i className="bi bi-chat-dots me-1"></i> Start Chat
-    </Link>
-    <Link to={`/video/${session._id}`} className="btn btn-success btn-sm">
-      <i className="bi bi-camera-video me-1"></i> Start Video
-    </Link>
-  </div>
-)} */}
                   {session.status === "accepted" 
                   // && new Date(session.date) >= new Date()
                    && (
@@ -191,8 +181,8 @@ const TutorMeetings = () => {
                           </button>
                         </>
                       )}
-                      <Link to={`/chat/${session.student._id}`} className="btn btn-primary btn-sm">
-                        Chat with {session.student.name}
+                      <Link to={session.student && session.student._id ? `/chat/${session.student._id}` : "#"} className="btn btn-primary btn-sm" disabled={!session.student || !session.student._id}>
+                        Chat with {session.student && session.student.name ? session.student.name : "Student"}
                       </Link>
                     </>
                   )}

@@ -66,6 +66,9 @@ export const getConversations = createAsyncThunk("chat/getConversations", async 
 // Get messages between users
 export const getMessages = createAsyncThunk("chat/getMessages", async (userId, thunkAPI) => {
   try {
+    if (!userId) {
+      return thunkAPI.rejectWithValue("User ID is required")
+    }
     const response = await axios.get(`${API_URLS.MESSAGES}/${userId}`)
     return { userId, messages: response.data.data }
   } catch (error) {
@@ -77,6 +80,9 @@ export const getMessages = createAsyncThunk("chat/getMessages", async (userId, t
 // Get session messages
 export const getSessionMessages = createAsyncThunk("chat/getSessionMessages", async (sessionId, thunkAPI) => {
   try {
+    if (!sessionId) {
+      return thunkAPI.rejectWithValue("Session ID is required")
+    }
     const token = thunkAPI.getState().auth.token
     const config = {
       headers: {
@@ -95,6 +101,10 @@ export const getSessionMessages = createAsyncThunk("chat/getSessionMessages", as
 // Send message
 export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageData, thunkAPI) => {
   try {
+    if (!messageData.receiver) {
+      return thunkAPI.rejectWithValue("Receiver ID is required")
+    }
+    
     const response = await axios.post(API_URLS.MESSAGES, messageData)
 
     // Emit message via socket if connected
@@ -116,6 +126,10 @@ export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageDa
 // Mark messages as read
 export const markMessagesAsRead = createAsyncThunk("chat/markMessagesAsRead", async (userId, thunkAPI) => {
   try {
+    if (!userId) {
+      return thunkAPI.rejectWithValue("User ID is required")
+    }
+    
     const token = thunkAPI.getState().auth.token
     const config = {
       headers: {
@@ -126,7 +140,7 @@ export const markMessagesAsRead = createAsyncThunk("chat/markMessagesAsRead", as
     const response = await axios.put(`${API_URL}/read/${userId}`, {}, config)
 
     // Emit read receipt via socket
-    if (socket) {
+    if (socket && socket.connected) {
       socket.emit("markAsRead", {
         sender: userId,
       })
@@ -267,7 +281,6 @@ const chatSlice = createSlice({
         // Add some debugging
         console.log("Messages loaded:", action.payload.userId, action.payload.messages);
       })
-    
       .addCase(getMessages.rejected, (state, action) => {
         state.isLoading = false
         state.error = action.payload
@@ -355,46 +368,52 @@ export default chatSlice.reducer
 
 // Socket event listeners
 export const setupSocketListeners = (socket, dispatch) => {
-  if (!socket) return
+  if (!socket) return;
+
+  // Check if socket has the off method before using it
+  const removeListener = socket.off 
+    ? (event) => socket.off(event)
+    : () => console.log('Socket.off not available');
 
   // Remove any existing listeners to prevent duplicates
-  socket.off("newMessage")
-  socket.off("userTyping")
-  socket.off("userStoppedTyping")
-  socket.off("messagesRead")
-  socket.off("sessionStatusChanged")
+  if (socket.off) {
+    removeListener("newMessage");
+    removeListener("userTyping");
+    removeListener("userStoppedTyping");
+    removeListener("messagesRead");
+    removeListener("sessionStatusChanged");
+  }
 
   // Add new listeners
   socket.on("newMessage", (message) => {
-    console.log("Recieved Message: ", message);
-    dispatch(receiveMessage({ message }))
-  })
+    console.log("Received Message: ", message);
+    dispatch(receiveMessage({ message }));
+  });
 
   socket.on("userTyping", (data) => {
-    dispatch(updateTypingStatus({ user: data.user, isTyping: true }))
-  })
+    dispatch(updateTypingStatus({ user: data.user, isTyping: true }));
+  });
 
   socket.on("userStoppedTyping", (data) => {
-    dispatch(updateTypingStatus({ user: data.user, isTyping: false }))
-  })
+    dispatch(updateTypingStatus({ user: data.user, isTyping: false }));
+  });
 
   socket.on("messagesRead", () => {
     // Refresh conversations to update read status
-    dispatch(getConversations())
-  })
+    dispatch(getConversations());
+  });
 
   socket.on("sessionStatusChanged", (data) => {
     // Could dispatch an action to update session status
-    console.log("Session status changed:", data)
-  })
+    console.log("Session status changed:", data);
+  });
 
   // Add error handling
   socket.on("connect_error", (error) => {
-    console.error("Socket connection error:", error)
-  })
+    console.error("Socket connection error:", error);
+  });
 
   socket.on("error", (error) => {
-    console.error("Socket error:", error)
-  })
+    console.error("Socket error:", error);
+  });
 }
-
