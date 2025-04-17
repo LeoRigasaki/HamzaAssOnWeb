@@ -1,5 +1,7 @@
 const Message = require('../models/Message.model');
 const User = require('../models/User.model');
+const Student = require('../models/Student.model');
+const Tutor = require('../models/Tutor.model');
 const Session = require('../models/Session.model');
 
 // @desc    Get messages between users
@@ -15,6 +17,19 @@ exports.getMessagesBetweenUsers = async (req, res) => {
       });
     }
     
+    // Log request details
+    console.log(`Getting messages between ${req.user.id} and ${req.params.userId}`);
+    
+    // Ensure the other user exists before trying to fetch messages
+    const otherUser = await User.findById(req.params.userId).select('name role');
+    if (!otherUser) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+    
+    // Get messages between users
     let messages = await Message.find({
       $or: [
         { sender: req.user.id, receiver: req.params.userId },
@@ -29,37 +44,61 @@ exports.getMessagesBetweenUsers = async (req, res) => {
       .populate({
         path: 'receiver',
         select: 'name role'
-      });
+      })
+      .lean();  // Use lean() for better performance with large datasets
 
     // Log retrieved messages for debugging
     console.log(`Found ${messages.length} messages between users ${req.user.id} and ${req.params.userId}`);
 
+    // Check if population worked correctly 
+    for (const message of messages) {
+      // If sender population failed
+      if (!message.sender || typeof message.sender === 'string' || !message.sender.name) {
+        const senderId = typeof message.sender === 'object' ? message.sender._id : message.sender;
+        console.log(`Sender population failed for message ${message._id}, sender: ${senderId}`);
+        
+        try {
+          const senderUser = await User.findById(senderId).select('name role').lean();
+          if (senderUser) {
+            message.sender = senderUser;
+          }
+        } catch (err) {
+          console.error(`Error fetching sender info for message ${message._id}:`, err);
+        }
+      }
+      
+      // If receiver population failed
+      if (!message.receiver || typeof message.receiver === 'string' || !message.receiver.name) {
+        const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
+        console.log(`Receiver population failed for message ${message._id}, receiver: ${receiverId}`);
+        
+        try {
+          const receiverUser = await User.findById(receiverId).select('name role').lean();
+          if (receiverUser) {
+            message.receiver = receiverUser;
+          }
+        } catch (err) {
+          console.error(`Error fetching receiver info for message ${message._id}:`, err);
+        }
+      }
+    }
+
     // For testing: If no messages exist, create a welcome message
     if (messages.length === 0) {
-      // Get receiver details 
-      const receiver = await User.findById(req.params.userId).select('name role');
-      const sender = await User.findById(req.user.id).select('name role');
-      
-      if (!receiver) {
-        return res.status(404).json({
-          success: false,
-          error: 'Receiver user not found'
-        });
-      }
-
+      // Create a welcome message object
       const welcomeMessage = {
         _id: "welcome-message-" + Date.now(),
         content: "Welcome to the chat! This is the beginning of your conversation.",
         createdAt: new Date(),
         sender: {
           _id: req.user.id,
-          name: sender.name,
-          role: sender.role
+          name: req.user.name,
+          role: req.user.role
         },
         receiver: {
           _id: req.params.userId,
-          name: receiver.name,
-          role: receiver.role
+          name: otherUser.name,
+          role: otherUser.role
         },
         isRead: true
       };
@@ -116,7 +155,45 @@ exports.getSessionMessages = async (req, res) => {
       .populate({
         path: 'sender',
         select: 'name role'
-      });
+      })
+      .populate({
+        path: 'receiver',
+        select: 'name role'
+      })
+      .lean();
+
+    // Check if population worked correctly 
+    for (const message of messages) {
+      // If sender population failed
+      if (!message.sender || typeof message.sender === 'string' || !message.sender.name) {
+        const senderId = typeof message.sender === 'object' ? message.sender._id : message.sender;
+        console.log(`Sender population failed for session message ${message._id}, sender: ${senderId}`);
+        
+        try {
+          const senderUser = await User.findById(senderId).select('name role').lean();
+          if (senderUser) {
+            message.sender = senderUser;
+          }
+        } catch (err) {
+          console.error(`Error fetching sender info for session message ${message._id}:`, err);
+        }
+      }
+      
+      // If receiver population failed
+      if (!message.receiver || typeof message.receiver === 'string' || !message.receiver.name) {
+        const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
+        console.log(`Receiver population failed for session message ${message._id}, receiver: ${receiverId}`);
+        
+        try {
+          const receiverUser = await User.findById(receiverId).select('name role').lean();
+          if (receiverUser) {
+            message.receiver = receiverUser;
+          }
+        } catch (err) {
+          console.error(`Error fetching receiver info for session message ${message._id}:`, err);
+        }
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -124,6 +201,7 @@ exports.getSessionMessages = async (req, res) => {
       data: messages
     });
   } catch (err) {
+    console.error("Error in getSessionMessages:", err);
     res.status(500).json({
       success: false,
       error: 'Server Error'
@@ -179,7 +257,25 @@ exports.sendMessage = async (req, res) => {
       .populate({
         path: 'receiver',
         select: 'name role'
-      });
+      })
+      .lean();
+
+    // Double check that population worked
+    if (!populatedMessage.sender || !populatedMessage.sender.name) {
+      populatedMessage.sender = {
+        _id: req.user.id,
+        name: req.user.name,
+        role: req.user.role
+      };
+    }
+
+    if (!populatedMessage.receiver || !populatedMessage.receiver.name) {
+      populatedMessage.receiver = {
+        _id: receiver,
+        name: receiverUser.name,
+        role: receiverUser.role
+      };
+    }
 
     console.log(`Message sent from ${req.user.id} to ${receiver}: ${content.substring(0, 30)}...`);
 
@@ -252,6 +348,7 @@ exports.getUnreadMessageCount = async (req, res) => {
       data: { count }
     });
   } catch (err) {
+    console.error("Error in getUnreadMessageCount:", err);
     res.status(500).json({
       success: false,
       error: 'Server Error'
@@ -296,7 +393,8 @@ exports.getUserConversations = async (req, res) => {
           ]
         })
           .sort({ createdAt: -1 })
-          .select('content createdAt isRead sender');
+          .select('content createdAt isRead sender')
+          .lean();
 
         // Get unread count
         const unreadCount = await Message.countDocuments({
@@ -315,7 +413,7 @@ exports.getUserConversations = async (req, res) => {
 
     // Sort conversations by last message date
     conversations.sort((a, b) => 
-      new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt)
+      new Date(b.lastMessage?.createdAt || 0) - new Date(a.lastMessage?.createdAt || 0)
     );
 
     res.status(200).json({
@@ -324,6 +422,7 @@ exports.getUserConversations = async (req, res) => {
       data: conversations
     });
   } catch (err) {
+    console.error("Error in getUserConversations:", err);
     res.status(500).json({
       success: false,
       error: 'Server Error'

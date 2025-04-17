@@ -290,82 +290,59 @@ exports.addMeetingLink = async (req, res) => {
 // @desc    Get upcoming sessions
 // @route   GET /api/v1/sessions/upcoming
 // @access  Private
-// exports.getUpcomingSessions = async (req, res) => {
-//   try {
-//     let query;
-//     const now = new Date();
-
-//     // If user is a student, get only their upcoming sessions
-//     if (req.user.role === 'student') {
-//       query = Session.find({
-//         student: req.user.id,
-//         date: { $gte: now },
-//         status: 'accepted'
-//       });
-//     } 
-//     // If user is a tutor, get only their upcoming sessions
-//     else if (req.user.role === 'tutor') {
-//       query = Session.find({
-//         tutor: req.user.id,
-//         date: { $gte: now },
-//         status: 'accepted'
-//       });
-//     } 
-//     // If user is an admin, get all upcoming sessions
-//     else if (req.user.role === 'admin') {
-//       query = Session.find({
-//         date: { $gte: now },
-//         status: 'accepted'
-//       });
-//     }
-
-//     // Add population
-//     query = query
-//       .populate({
-//         path: 'student',
-//         select: 'name email'
-//       })
-//       .populate({
-//         path: 'tutor',
-//         select: 'name email'
-//       })
-//       .sort({ date: 1 });
-
-//     // Execute query
-//     const sessions = await query;
-
-//     res.status(200).json({
-//       success: true,
-//       count: sessions.length,
-//       data: sessions
-//     });
-//   } catch (err) {
-//     res.status(500).json({
-//       success: false,
-//       error: 'Server Error'
-//     });
-//   }
-// };
-
-// this is 
 exports.getUpcomingSessions = async (req, res) => {
   try {
-    const now = new Date();
+    console.log("Getting upcoming sessions for user:", req.user.id, "with role:", req.user.role);
     
-    // Use lean() for better performance when you don't need Mongoose documents
-    const sessions = await Session.find({
-      $and: [
-        { [req.user.role === 'student' ? 'student' : 'tutor']: req.user.id },
-        { date: { $gte: now } }
-      ]
-    })
-    .select('subject date startTime endTime status tutor student')
-    .populate({
-      path: req.user.role === 'student' ? 'tutor' : 'student',
-      select: 'name email'
-    })
-    .sort('date startTime')
-    .lean();
+    // Build the query based on user role
+    let query;
+    
+    if (req.user.role === 'student') {
+      query = {
+        student: req.user.id
+      };
+    } else if (req.user.role === 'tutor') {
+      query = {
+        tutor: req.user.id
+      };
+    } else if (req.user.role === 'admin') {
+      // Admins can see all sessions
+      query = {};
+    } else {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized role'
+      });
+    }
+    
+    // Use lean() for better performance 
+    const sessions = await Session.find(query)
+      .populate({
+        path: 'student',
+        select: 'name email', // Add any other fields you need
+        model: 'Student'
+      })
+      .populate({
+        path: 'tutor',
+        select: 'name email expertise hourlyRate', // Add any other fields you need
+        model: 'Tutor'
+      })
+      .sort('date startTime')
+      .lean();
+    
+    console.log(`Found ${sessions.length} upcoming sessions`);
+    
+    // Log the first session for debugging if there are any
+    if (sessions.length > 0) {
+      console.log("Sample session:", {
+        id: sessions[0]._id,
+        subject: sessions[0].subject,
+        hasStudent: !!sessions[0].student,
+        hasTutor: !!sessions[0].tutor,
+        studentType: sessions[0].student ? typeof sessions[0].student : 'none',
+        tutorType: sessions[0].tutor ? typeof sessions[0].tutor : 'none'
+      });
+    }
     
     res.status(200).json({
       success: true,
@@ -373,6 +350,81 @@ exports.getUpcomingSessions = async (req, res) => {
       data: sessions
     });
   } catch (error) {
+    console.error("Error in getUpcomingSessions:", error);
+    res.status(500).json({
+      success: false,
+      error: 'Server Error'
+    });
+  }
+};
+
+// Same improvement for session history
+exports.getSessionHistory = async (req, res) => {
+  try {
+    console.log("Getting session history for user:", req.user.id, "with role:", req.user.role);
+    
+    // Build the query based on user role
+    let query;
+    const now = new Date();
+
+    // If user is a student, get only their past sessions
+    if (req.user.role === 'student') {
+      query = {
+        student: req.user.id,
+        $or: [
+          { date: { $lt: now } },
+          { status: { $in: ['completed', 'cancelled', 'rejected'] } }
+        ]
+      };
+    } 
+    // If user is a tutor, get only their past sessions
+    else if (req.user.role === 'tutor') {
+      query = {
+        tutor: req.user.id,
+        $or: [
+          { date: { $lt: now } },
+          { status: { $in: ['completed', 'cancelled', 'rejected'] } }
+        ]
+      };
+    } 
+    // If user is an admin, get all past sessions
+    else if (req.user.role === 'admin') {
+      query = {
+        $or: [
+          { date: { $lt: now } },
+          { status: { $in: ['completed', 'cancelled', 'rejected'] } }
+        ]
+      };
+    } else {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized role'
+      });
+    }
+
+    // Add population
+    const sessions = await Session.find(query)
+      .populate({
+        path: 'student',
+        select: 'name email',
+        model: 'Student'
+      })
+      .populate({
+        path: 'tutor',
+        select: 'name email expertise hourlyRate',
+        model: 'Tutor'
+      })
+      .sort({ date: -1 });
+
+    console.log(`Found ${sessions.length} historical sessions`);
+    
+    res.status(200).json({
+      success: true,
+      count: sessions.length,
+      data: sessions
+    });
+  } catch (err) {
+    console.error("Error in getSessionHistory:", err);
     res.status(500).json({
       success: false,
       error: 'Server Error'
@@ -396,6 +448,9 @@ exports.getSessionHistory = async (req, res) => {
           { date: { $lt: now } },
           { status: { $in: ['completed', 'cancelled', 'rejected'] } }
         ]
+      }).populate({
+        path: 'tutor',
+        select: 'name email'
       });
     } 
     // If user is a tutor, get only their past sessions
@@ -406,6 +461,9 @@ exports.getSessionHistory = async (req, res) => {
           { date: { $lt: now } },
           { status: { $in: ['completed', 'cancelled', 'rejected'] } }
         ]
+      }).populate({
+        path: 'student',
+        select: 'name email'
       });
     } 
     // If user is an admin, get all past sessions
@@ -415,11 +473,7 @@ exports.getSessionHistory = async (req, res) => {
           { date: { $lt: now } },
           { status: { $in: ['completed', 'cancelled', 'rejected'] } }
         ]
-      });
-    }
-
-    // Add population
-    query = query
+      })
       .populate({
         path: 'student',
         select: 'name email'
@@ -427,11 +481,39 @@ exports.getSessionHistory = async (req, res) => {
       .populate({
         path: 'tutor',
         select: 'name email'
-      })
-      .sort({ date: -1 });
+      });
+    }
+
+    // Sort by date descending
+    query = query.sort({ date: -1 });
 
     // Execute query
-    const sessions = await query;
+    const sessions = await query.lean();
+    
+    // Check for missing user information
+    for (const session of sessions) {
+      if (req.user.role === 'student' && (!session.tutor || !session.tutor.name)) {
+        console.log("Missing tutor info in history, fetching it");
+        try {
+          const tutor = await Tutor.findById(session.tutor).select('name email').lean();
+          if (tutor) {
+            session.tutor = tutor;
+          }
+        } catch (err) {
+          console.error(`Error fetching tutor info for session ${session._id} in history:`, err);
+        }
+      } else if (req.user.role === 'tutor' && (!session.student || !session.student.name)) {
+        console.log("Missing student info in history, fetching it");
+        try {
+          const student = await Student.findById(session.student).select('name email').lean();
+          if (student) {
+            session.student = student;
+          }
+        } catch (err) {
+          console.error(`Error fetching student info for session ${session._id} in history:`, err);
+        }
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -439,6 +521,7 @@ exports.getSessionHistory = async (req, res) => {
       data: sessions
     });
   } catch (err) {
+    console.error("Error in getSessionHistory:", err);
     res.status(500).json({
       success: false,
       error: 'Server Error'
