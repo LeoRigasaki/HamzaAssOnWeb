@@ -1,5 +1,3 @@
-"use client"
-
 import { useEffect, useState } from "react"
 import { useSelector, useDispatch } from "react-redux"
 import { Link } from "react-router-dom"
@@ -9,10 +7,11 @@ import {
   updateSessionStatus,
   addMeetingLink,
 } from "../../features/sessions/sessionSlice"
+import LoadingSpinner from "../../components/common/LoadingSpinner"
 
 const TutorMeetings = () => {
   const dispatch = useDispatch()
-  const { sessions, upcomingSessions, sessionHistory, isLoading, error } = useSelector((state) => state.sessions)
+  const { upcomingSessions, sessionHistory, isLoading, error } = useSelector((state) => state.sessions)
 
   const [activeTab, setActiveTab] = useState("upcoming")
   const [statusUpdating, setStatusUpdating] = useState(null)
@@ -21,20 +20,47 @@ const TutorMeetings = () => {
     meetingLink: "",
   })
   const [showLinkModal, setShowLinkModal] = useState(false)
+  const [refreshCount, setRefreshCount] = useState(0)
+  const [localError, setLocalError] = useState(null)
 
+  // Load data on initial render and when refresh is triggered
   useEffect(() => {
-    dispatch(getUpcomingSessions())
-    dispatch(getSessionHistory())
-  }, [dispatch])
+    const loadData = async () => {
+      try {
+        setLocalError(null);
+        await Promise.all([
+          dispatch(getUpcomingSessions()).unwrap(),
+          dispatch(getSessionHistory()).unwrap()
+        ]);
+      } catch (err) {
+        console.error("Failed to load sessions:", err);
+        setLocalError("Failed to load your sessions. Please try again.");
+      }
+    };
+    
+    loadData();
+  }, [dispatch, refreshCount]);
+
+  // Add a manual refresh function
+  const handleRefresh = () => {
+    setRefreshCount(prev => prev + 1);
+  };
 
   const handleStatusChange = (sessionId, status) => {
     setStatusUpdating(sessionId)
-    dispatch(updateSessionStatus({ id: sessionId, status })).then(() => {
-      setStatusUpdating(null)
-      // Refresh the sessions
-      dispatch(getUpcomingSessions())
-      dispatch(getSessionHistory())
-    })
+    dispatch(updateSessionStatus({ id: sessionId, status }))
+      .unwrap()
+      .then(() => {
+        // Refresh the sessions on success
+        handleRefresh();
+      })
+      .catch(err => {
+        console.error("Error updating status:", err);
+        setLocalError("Failed to update session status. Please try again.");
+      })
+      .finally(() => {
+        setStatusUpdating(null);
+      });
   }
 
   const handleAddMeetingLink = () => {
@@ -44,15 +70,21 @@ const TutorMeetings = () => {
           id: meetingLinkData.sessionId,
           meetingLink: meetingLinkData.meetingLink,
         }),
-      ).then(() => {
-        setShowLinkModal(false)
-        setMeetingLinkData({
-          sessionId: null,
-          meetingLink: "",
+      )
+        .unwrap()
+        .then(() => {
+          setShowLinkModal(false);
+          setMeetingLinkData({
+            sessionId: null,
+            meetingLink: "",
+          });
+          // Refresh the sessions
+          handleRefresh();
         })
-        // Refresh the sessions
-        dispatch(getUpcomingSessions())
-      })
+        .catch(err => {
+          console.error("Error adding meeting link:", err);
+          setLocalError("Failed to add meeting link. Please try again.");
+        });
     }
   }
 
@@ -65,7 +97,12 @@ const TutorMeetings = () => {
   }
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString()
+    try {
+      return new Date(dateString).toLocaleDateString()
+    } catch (err) {
+      console.error("Date formatting error:", err);
+      return "Invalid date";
+    }
   }
 
   const getStatusBadge = (status) => {
@@ -85,18 +122,69 @@ const TutorMeetings = () => {
     }
   }
 
+  // Helper function to safely get student name
+  const getStudentName = (session) => {
+    try {
+      if (!session) return "Student";
+      
+      // Debug output for testing
+      if (process.env.NODE_ENV === 'development') {
+        console.log("Session student data:", session.student);
+      }
+      
+      if (session.student) {
+        if (typeof session.student === 'object' && session.student.name) {
+          return session.student.name;
+        }
+        if (typeof session.student === 'string') {
+          return "Student";
+        }
+      }
+      
+      return "Student";
+    } catch (err) {
+      console.error("Error getting student name:", err);
+      return "Student";
+    }
+  }
+
+  // Helper function to check if chat link should be enabled
+  const isChatLinkEnabled = (session) => {
+    try {
+      return session && session.student && 
+             (typeof session.student === 'object' && session.student._id);
+    } catch (err) {
+      console.error("Error checking chat link:", err);
+      return false;
+    }
+  }
+
+  // Helper function to get student ID for chat link
+  const getChatLinkId = (session) => {
+    try {
+      if (!session || !session.student) return "";
+      
+      if (typeof session.student === 'object' && session.student._id) {
+        return session.student._id;
+      }
+      
+      if (typeof session.student === 'string') {
+        return session.student;
+      }
+      
+      return "";
+    } catch (err) {
+      console.error("Error getting chat ID:", err);
+      return "";
+    }
+  }
+
   const renderSessionList = (sessionList) => {
-    if (isLoading) {
-      return (
-        <div className="text-center py-5">
-          <div className="spinner-border text-primary" role="status">
-            <span className="visually-hidden">Loading...</span>
-          </div>
-        </div>
-      )
+    if (isLoading && !sessionList.length) {
+      return <LoadingSpinner />
     }
 
-    if (sessionList.length === 0) {
+    if (!sessionList || sessionList.length === 0) {
       return (
         <div className="text-center py-5">
           <p>No sessions found.</p>
@@ -113,15 +201,15 @@ const TutorMeetings = () => {
           <div key={session._id} className="list-group-item list-group-item-action">
             <div className="d-flex w-100 justify-content-between align-items-center">
               <div>
-                <h5 className="mb-1">{session.subject}</h5>
+                <h5 className="mb-1">{session.subject || "Untitled Session"}</h5>
                 <p className="mb-1">
-                  <strong>Student:</strong> {session.student && session.student.name ? session.student.name : (session.studentId || "Unknown")}
+                  <strong>Student:</strong> {getStudentName(session)}
                 </p>
                 <p className="mb-1">
                   <strong>Date:</strong> {formatDate(session.date)}
                 </p>
                 <p className="mb-1">
-                  <strong>Time:</strong> {session.startTime} - {session.endTime}
+                  <strong>Time:</strong> {session.startTime || "Not set"} - {session.endTime || "Not set"}
                 </p>
                 {session.notes && (
                   <p className="mb-1">
@@ -158,9 +246,7 @@ const TutorMeetings = () => {
                       </button>
                     </>
                   )}
-                  {session.status === "accepted" 
-                  // && new Date(session.date) >= new Date()
-                   && (
+                  {session.status === "accepted" && (
                     <>
                       {session.meetingLink ? (
                         <a
@@ -181,8 +267,11 @@ const TutorMeetings = () => {
                           </button>
                         </>
                       )}
-                      <Link to={session.student && session.student._id ? `/chat/${session.student._id}` : "#"} className="btn btn-primary btn-sm" disabled={!session.student || !session.student._id}>
-                        Chat with {session.student && session.student.name ? session.student.name : "Student"}
+                      <Link 
+                        to={isChatLinkEnabled(session) ? `/chat/${getChatLinkId(session)}` : "#"} 
+                        className={`btn btn-primary btn-sm ${!isChatLinkEnabled(session) ? 'disabled' : ''}`}
+                      >
+                        Chat with {getStudentName(session)}
                       </Link>
                     </>
                   )}
@@ -206,11 +295,23 @@ const TutorMeetings = () => {
 
   return (
     <div className="container">
-      <h2 className="mb-4">My Sessions</h2>
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <h2>My Sessions</h2>
+        <button 
+          className="btn btn-outline-secondary"
+          onClick={handleRefresh}
+          disabled={isLoading}
+        >
+          {isLoading ? 'Refreshing...' : <><i className="bi bi-arrow-clockwise me-1"></i> Refresh</>}
+        </button>
+      </div>
 
-      {error && (
+      {(error || localError) && (
         <div className="alert alert-danger" role="alert">
-          {error}
+          {error || localError}
+          <button className="btn btn-sm btn-outline-danger ms-2" onClick={() => setLocalError(null)}>
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -283,4 +384,3 @@ const TutorMeetings = () => {
 }
 
 export default TutorMeetings
-

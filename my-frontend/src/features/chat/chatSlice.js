@@ -3,7 +3,7 @@ import axios from "../../config/api"
 import { API_URLS, SOCKET_URL } from "../../config/api"
 import io from "socket.io-client"
 
-const API_URL = "http://localhost:5000/api/v1/messages" // This line is replaced by the config import
+const API_URL = API_URLS.MESSAGES
 let socket
 
 // Connect to socket
@@ -48,14 +48,7 @@ export const disconnectSocket = createAsyncThunk("chat/disconnectSocket", async 
 // Get user conversations
 export const getConversations = createAsyncThunk("chat/getConversations", async (_, thunkAPI) => {
   try {
-    const token = thunkAPI.getState().auth.token
-    const config = {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-
-    const response = await axios.get(`${API_URL}/conversations`, config)
+    const response = await axios.get(`${API_URL}/conversations`)
     return response.data
   } catch (error) {
     const message = error.response?.data?.error || error.message || "Something went wrong"
@@ -69,7 +62,7 @@ export const getMessages = createAsyncThunk("chat/getMessages", async (userId, t
     if (!userId) {
       return thunkAPI.rejectWithValue("User ID is required")
     }
-    const response = await axios.get(`${API_URLS.MESSAGES}/${userId}`)
+    const response = await axios.get(`${API_URL}/${userId}`)
     return { userId, messages: response.data.data }
   } catch (error) {
     const message = error.response?.data?.error || error.message || "Something went wrong"
@@ -83,14 +76,7 @@ export const getSessionMessages = createAsyncThunk("chat/getSessionMessages", as
     if (!sessionId) {
       return thunkAPI.rejectWithValue("Session ID is required")
     }
-    const token = thunkAPI.getState().auth.token
-    const config = {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-
-    const response = await axios.get(`${API_URL}/session/${sessionId}`, config)
+    const response = await axios.get(`${API_URL}/session/${sessionId}`)
     return { sessionId, messages: response.data.data }
   } catch (error) {
     const message = error.response?.data?.error || error.message || "Something went wrong"
@@ -105,7 +91,7 @@ export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageDa
       return thunkAPI.rejectWithValue("Receiver ID is required")
     }
     
-    const response = await axios.post(API_URLS.MESSAGES, messageData)
+    const response = await axios.post(API_URL, messageData)
 
     // Emit message via socket if connected
     if (socket && socket.connected) {
@@ -130,14 +116,7 @@ export const markMessagesAsRead = createAsyncThunk("chat/markMessagesAsRead", as
       return thunkAPI.rejectWithValue("User ID is required")
     }
     
-    const token = thunkAPI.getState().auth.token
-    const config = {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-
-    const response = await axios.put(`${API_URL}/read/${userId}`, {}, config)
+    const response = await axios.put(`${API_URL}/read/${userId}`, {})
 
     // Emit read receipt via socket
     if (socket && socket.connected) {
@@ -156,14 +135,7 @@ export const markMessagesAsRead = createAsyncThunk("chat/markMessagesAsRead", as
 // Get unread message count
 export const getUnreadCount = createAsyncThunk("chat/getUnreadCount", async (_, thunkAPI) => {
   try {
-    const token = thunkAPI.getState().auth.token
-    const config = {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-
-    const response = await axios.get(`${API_URL}/unread`, config)
+    const response = await axios.get(`${API_URL}/unread`)
     return response.data
   } catch (error) {
     const message = error.response?.data?.error || error.message || "Something went wrong"
@@ -200,11 +172,13 @@ const chatSlice = createSlice({
       // Add to appropriate message list
       const senderId = message.sender._id || message.sender
 
+      // Create a new array if it doesn't exist
       if (!state.messages[senderId]) {
         state.messages[senderId] = []
       }
 
-      state.messages[senderId].push(message)
+      // Create a new array with the new message
+      state.messages[senderId] = [...state.messages[senderId], message]
 
       // If session message, add to session messages
       if (message.session) {
@@ -214,7 +188,8 @@ const chatSlice = createSlice({
           state.sessionMessages[sessionId] = []
         }
 
-        state.sessionMessages[sessionId].push(message)
+        // Create a new array with the new message
+        state.sessionMessages[sessionId] = [...state.sessionMessages[sessionId], message]
       }
 
       // Update unread count if not current chat
@@ -226,10 +201,20 @@ const chatSlice = createSlice({
       const { user, isTyping } = action.payload
 
       // Find conversation and update typing status
-      const conversation = state.conversations.find((conv) => conv.user._id === user._id || conv.user === user._id)
+      const conversationIndex = state.conversations.findIndex(
+        (conv) => conv.user._id === user._id || conv.user === user._id
+      )
 
-      if (conversation) {
-        conversation.isTyping = isTyping
+      if (conversationIndex !== -1) {
+        // Create a new array with the updated conversation
+        state.conversations = [
+          ...state.conversations.slice(0, conversationIndex),
+          {
+            ...state.conversations[conversationIndex],
+            isTyping,
+          },
+          ...state.conversations.slice(conversationIndex + 1),
+        ]
       }
     },
   },
@@ -272,14 +257,11 @@ const chatSlice = createSlice({
       })
       .addCase(getMessages.fulfilled, (state, action) => {
         state.isLoading = false;
-        // Make sure we're not replacing the entire messages object
-        if (!state.messages[action.payload.userId]) {
-          state.messages[action.payload.userId] = [];
-        }
-        state.messages[action.payload.userId] = action.payload.messages;
-        
-        // Add some debugging
-        console.log("Messages loaded:", action.payload.userId, action.payload.messages);
+        // Create a new messages object with the updated messages for this userId
+        state.messages = {
+          ...state.messages,
+          [action.payload.userId]: action.payload.messages,
+        };
       })
       .addCase(getMessages.rejected, (state, action) => {
         state.isLoading = false
@@ -291,7 +273,11 @@ const chatSlice = createSlice({
       })
       .addCase(getSessionMessages.fulfilled, (state, action) => {
         state.isLoading = false
-        state.sessionMessages[action.payload.sessionId] = action.payload.messages
+        // Create a new sessionMessages object with the updated messages
+        state.sessionMessages = {
+          ...state.sessionMessages,
+          [action.payload.sessionId]: action.payload.messages,
+        }
       })
       .addCase(getSessionMessages.rejected, (state, action) => {
         state.isLoading = false
@@ -312,7 +298,11 @@ const chatSlice = createSlice({
           state.messages[receiverId] = []
         }
 
-        state.messages[receiverId].push(message)
+        // Create a new array with the new message
+        state.messages = {
+          ...state.messages,
+          [receiverId]: [...state.messages[receiverId], message],
+        }
 
         // If session message, add to session messages
         if (message.session) {
@@ -322,7 +312,11 @@ const chatSlice = createSlice({
             state.sessionMessages[sessionId] = []
           }
 
-          state.sessionMessages[sessionId].push(message)
+          // Create a new array with the new message
+          state.sessionMessages = {
+            ...state.sessionMessages,
+            [sessionId]: [...state.sessionMessages[sessionId], message],
+          }
         }
       })
       .addCase(sendMessage.rejected, (state, action) => {
@@ -350,10 +344,14 @@ const chatSlice = createSlice({
 
         // Update messages
         if (state.messages[userId]) {
-          state.messages[userId] = state.messages[userId].map((msg) => ({
-            ...msg,
-            isRead: true,
-          }))
+          // Create a new array with all messages marked as read
+          state.messages = {
+            ...state.messages,
+            [userId]: state.messages[userId].map((msg) => ({
+              ...msg,
+              isRead: true,
+            })),
+          }
         }
       })
       // Get unread count

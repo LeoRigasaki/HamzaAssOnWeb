@@ -1,34 +1,65 @@
-"use client"
-
 import { useEffect, useState } from "react"
 import { useSelector, useDispatch } from "react-redux"
 import { Link } from "react-router-dom"
 import { getUpcomingSessions, getSessionHistory, updateSessionStatus } from "../../features/sessions/sessionSlice"
+import LoadingSpinner from "../../components/common/LoadingSpinner"
 
 const StudentMeetings = () => {
   const dispatch = useDispatch()
-  const { sessions, upcomingSessions, sessionHistory, isLoading, error } = useSelector((state) => state.sessions)
+  const { upcomingSessions, sessionHistory, isLoading, error } = useSelector((state) => state.sessions)
 
   const [activeTab, setActiveTab] = useState("upcoming")
   const [statusUpdating, setStatusUpdating] = useState(null)
+  const [refreshCount, setRefreshCount] = useState(0)
+  const [localError, setLocalError] = useState(null)
 
+  // Load data on initial render and when refresh is triggered
   useEffect(() => {
-    dispatch(getUpcomingSessions())
-    dispatch(getSessionHistory())
-  }, [dispatch])
+    const loadData = async () => {
+      try {
+        setLocalError(null);
+        await Promise.all([
+          dispatch(getUpcomingSessions()).unwrap(),
+          dispatch(getSessionHistory()).unwrap()
+        ]);
+      } catch (err) {
+        console.error("Failed to load sessions:", err);
+        setLocalError("Failed to load your sessions. Please try again.");
+      }
+    };
+    
+    loadData();
+  }, [dispatch, refreshCount]);
+
+  // Add a manual refresh function
+  const handleRefresh = () => {
+    setRefreshCount(prev => prev + 1);
+  };
 
   const handleStatusChange = (sessionId, status) => {
     setStatusUpdating(sessionId)
-    dispatch(updateSessionStatus({ id: sessionId, status })).then(() => {
-      setStatusUpdating(null)
-      // Refresh the sessions
-      dispatch(getUpcomingSessions())
-      dispatch(getSessionHistory())
-    })
+    dispatch(updateSessionStatus({ id: sessionId, status }))
+      .unwrap()
+      .then(() => {
+        // Refresh the sessions on success
+        handleRefresh();
+      })
+      .catch(err => {
+        console.error("Error updating status:", err);
+        setLocalError("Failed to update session status. Please try again.");
+      })
+      .finally(() => {
+        setStatusUpdating(null);
+      });
   }
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString()
+    try {
+      return new Date(dateString).toLocaleDateString()
+    } catch (err) {
+      console.error("Date formatting error:", err);
+      return "Invalid date";
+    }
   }
 
   const getStatusBadge = (status) => {
@@ -48,18 +79,69 @@ const StudentMeetings = () => {
     }
   }
 
+  // Helper function to safely get tutor name
+  const getTutorName = (session) => {
+    try {
+      if (!session) return "Tutor";
+      
+      // Debug output for testing
+      if (process.env.NODE_ENV === 'development') {
+        console.log("Session tutor data:", session.tutor);
+      }
+      
+      if (session.tutor) {
+        if (typeof session.tutor === 'object' && session.tutor.name) {
+          return session.tutor.name;
+        }
+        if (typeof session.tutor === 'string') {
+          return "Tutor";
+        }
+      }
+      
+      return "Tutor";
+    } catch (err) {
+      console.error("Error getting tutor name:", err);
+      return "Tutor";
+    }
+  }
+
+  // Helper function to check if chat link should be enabled
+  const isChatLinkEnabled = (session) => {
+    try {
+      return session && session.tutor && 
+             (typeof session.tutor === 'object' && session.tutor._id);
+    } catch (err) {
+      console.error("Error checking chat link:", err);
+      return false;
+    }
+  }
+
+  // Helper function to get tutor ID for chat link
+  const getChatLinkId = (session) => {
+    try {
+      if (!session || !session.tutor) return "";
+      
+      if (typeof session.tutor === 'object' && session.tutor._id) {
+        return session.tutor._id;
+      }
+      
+      if (typeof session.tutor === 'string') {
+        return session.tutor;
+      }
+      
+      return "";
+    } catch (err) {
+      console.error("Error getting chat ID:", err);
+      return "";
+    }
+  }
+
   const renderSessionList = (sessionList) => {
-    if (isLoading) {
-      return (
-        <div className="text-center py-5">
-          <div className="spinner-border text-primary" role="status">
-            <span className="visually-hidden">Loading...</span>
-          </div>
-        </div>
-      )
+    if (isLoading && !sessionList.length) {
+      return <LoadingSpinner />
     }
 
-    if (sessionList.length === 0) {
+    if (!sessionList || sessionList.length === 0) {
       return (
         <div className="text-center py-5">
           <p>No sessions found.</p>
@@ -76,15 +158,15 @@ const StudentMeetings = () => {
           <div key={session._id} className="list-group-item list-group-item-action">
             <div className="d-flex w-100 justify-content-between align-items-center">
               <div>
-                <h5 className="mb-1">{session.subject}</h5>
+                <h5 className="mb-1">{session.subject || "Untitled Session"}</h5>
                 <p className="mb-1">
-                  <strong>Tutor:</strong> {session.tutor.name}
+                  <strong>Tutor:</strong> {getTutorName(session)}
                 </p>
                 <p className="mb-1">
                   <strong>Date:</strong> {formatDate(session.date)}
                 </p>
                 <p className="mb-1">
-                  <strong>Time:</strong> {session.startTime} - {session.endTime}
+                  <strong>Time:</strong> {session.startTime || "Not set"} - {session.endTime || "Not set"}
                 </p>
                 {session.notes && (
                   <p className="mb-1">
@@ -95,19 +177,7 @@ const StudentMeetings = () => {
               <div className="text-end">
                 <div className="mb-2">{getStatusBadge(session.status)}</div>
                 <div className="btn-group">
-                {/* {session.status === "accepted" && (
-  <div className="btn-group">
-    <Link to={`/chat/${session.tutor._id}`} className="btn btn-primary btn-sm">
-      <i className="bi bi-chat-dots me-1"></i> Start Chat
-    </Link>
-    <Link to={`/video/${session._id}`} className="btn btn-success btn-sm">
-      <i className="bi bi-camera-video me-1"></i> Start Video
-    </Link>
-  </div>
-)} */}
-                  {session.status === "accepted" 
-                  // && new Date(session.date) >= new Date() 
-                  && (
+                  {session.status === "accepted" && (
                     <>
                       {session.meetingLink ? (
                         <a
@@ -120,11 +190,14 @@ const StudentMeetings = () => {
                         </a>
                       ) : (
                         <Link to={`/video/${session._id}`} className="btn btn-success btn-sm">
-                          Start Video with {session.tutor.name}
+                          Start Video
                         </Link>
                       )}
-                      <Link to={`/chat/${session.tutor._id}`} className="btn btn-primary btn-sm">
-                        Chat with {session.tutor.name}  
+                      <Link 
+                        to={isChatLinkEnabled(session) ? `/chat/${getChatLinkId(session)}` : "#"} 
+                        className={`btn btn-primary btn-sm ${!isChatLinkEnabled(session) ? 'disabled' : ''}`}
+                      >
+                        Chat with {getTutorName(session)}
                       </Link>
                     </>
                   )}
@@ -153,11 +226,23 @@ const StudentMeetings = () => {
 
   return (
     <div className="container">
-      <h2 className="mb-4">My Sessions</h2>
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <h2>My Sessions</h2>
+        <button 
+          className="btn btn-outline-secondary"
+          onClick={handleRefresh}
+          disabled={isLoading}
+        >
+          {isLoading ? 'Refreshing...' : <><i className="bi bi-arrow-clockwise me-1"></i> Refresh</>}
+        </button>
+      </div>
 
-      {error && (
+      {(error || localError) && (
         <div className="alert alert-danger" role="alert">
-          {error}
+          {error || localError}
+          <button className="btn btn-sm btn-outline-danger ms-2" onClick={() => setLocalError(null)}>
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -186,4 +271,3 @@ const StudentMeetings = () => {
 }
 
 export default StudentMeetings
-
