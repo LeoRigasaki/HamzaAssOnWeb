@@ -51,6 +51,23 @@ const initializeSocket = (server) => {
   io.on('connection', (socket) => {
     console.log(`User connected: ${socket.user.name} (${socket.user._id})`);
 
+    // Make socket available globally for debugging and access from other modules
+    if (typeof window !== 'undefined') {
+      window.socket = socket;
+    }
+    
+    // Add to global namespace for server-side access
+    if (!global.io) {
+      global.io = io;
+    }
+    
+    if (!global.sockets) {
+      global.sockets = {};
+    }
+    
+    // Store socket reference with user ID as key
+    global.sockets[socket.user._id.toString()] = socket;
+
     // Join personal room based on user ID
     const userId = socket.user._id.toString();
     socket.join(userId);
@@ -165,6 +182,7 @@ const initializeSocket = (server) => {
         io.to(conversationRoom).emit('newMessage', populatedMessage);
 
         // Also emit directly to both users' personal rooms as a fallback
+        // This ensures messages are delivered even if one user isn't in the conversation room
         io.to(socket.user._id.toString()).emit('newMessage', populatedMessage);
         io.to(receiver.toString()).emit('newMessage', populatedMessage);
 
@@ -269,6 +287,11 @@ const initializeSocket = (server) => {
     socket.on('disconnect', () => {
       console.log(`User disconnected: ${socket.user.name} (${socket.user._id})`);
       
+      // Clean up global socket reference
+      if (global.sockets && global.sockets[socket.user._id.toString()]) {
+        delete global.sockets[socket.user._id.toString()];
+      }
+
       // Let everyone know this user is offline
       socket.broadcast.emit('userOffline', {
         userId: socket.user._id.toString()

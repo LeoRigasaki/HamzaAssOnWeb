@@ -7,7 +7,8 @@ import {
   markMessagesAsRead,
   connectSocket,
   setupSocketListeners,
-  receiveMessage
+  receiveMessage,
+  setCurrentChat
 } from "../../features/chat/chatSlice";
 
 const ChatRoom = () => {
@@ -23,6 +24,7 @@ const ChatRoom = () => {
   const [localMessages, setLocalMessages] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const messagesEndRef = useRef(null);
+  const socketInitialized = useRef(false);
 
   // Debug logging
   useEffect(() => {
@@ -30,6 +32,18 @@ const ChatRoom = () => {
     console.log("Connection status:", connectionStatus);
     console.log("isConnected from Redux:", isConnected);
   }, [userId, connectionStatus, isConnected]);
+
+  // Set current chat in Redux
+  useEffect(() => {
+    if (userId) {
+      dispatch(setCurrentChat(userId));
+    }
+    
+    // Clean up when component unmounts
+    return () => {
+      dispatch(setCurrentChat(null));
+    };
+  }, [dispatch, userId]);
 
   // Connect to socket when component mounts
   useEffect(() => {
@@ -54,57 +68,47 @@ const ChatRoom = () => {
 
   // Set up socket listeners when socket is connected
   useEffect(() => {
-    if (connectionStatus === "connected" && userId) {
+    if (connectionStatus === "connected" && userId && !socketInitialized.current) {
       console.log("Setting up socket listeners");
       
-      // Create a custom message handler
-      const handleNewMessage = (message) => {
-        console.log("New message received:", message);
-        
-        // Check if this message is relevant to the current chat
-        const isRelevantMessage = 
-          (message.sender && message.sender._id === userId) || 
-          (message.receiver && message.receiver._id === userId);
-        
-        if (isRelevantMessage) {
-          console.log("Message is relevant to this chat, updating local state");
-          // First dispatch to Redux store
-          dispatch(receiveMessage({ message }));
-          
-          // Then update local state
-          setLocalMessages(prevMessages => [...prevMessages, message]);
-        }
-      };
+      // Get the socket instance from the global variable
+      // This is a workaround since we can't store socket in Redux
+      const socketInstance = window.io?.sockets?.socket || window.socket;
       
-      // Add custom event listener for new messages
-      if (socket && socket.on) {
-        console.log("Adding newMessage event listener");
-        socket.on("newMessage", handleNewMessage);
+      if (socketInstance) {
+        // Set up all the standard listeners using our helper
+        setupSocketListeners(socketInstance, dispatch);
         
         // Explicitly join this conversation room
         console.log("Joining conversation with:", userId);
-        socket.emit("joinConversation", userId);
+        socketInstance.emit("joinConversation", userId);
+        
+        // Mark this component as having initialized sockets
+        socketInitialized.current = true;
+      } else {
+        console.warn("Could not find socket instance for setting up listeners");
       }
       
       // Return cleanup function
       return () => {
-        if (socket && socket.off) {
-          console.log("Removing newMessage event listener");
-          socket.off("newMessage", handleNewMessage);
-          
-          // Leave the conversation when component unmounts
+        if (socketInstance) {
           console.log("Leaving conversation with:", userId);
-          socket.emit("leaveConversation", userId);
+          socketInstance.emit("leaveConversation", userId);
+          socketInitialized.current = false;
         }
       };
     }
-  }, [dispatch, connectionStatus, userId, socket]);
+  }, [dispatch, connectionStatus, userId]);
 
   // Update local messages when messages from store change
   useEffect(() => {
     if (messages && messages[userId]) {
       console.log("Updating local messages from Redux store");
-      setLocalMessages(messages[userId]);
+      // Sort messages by creation date to ensure proper order
+      const sortedMessages = [...messages[userId]].sort((a, b) => 
+        new Date(a.createdAt) - new Date(b.createdAt)
+      );
+      setLocalMessages(sortedMessages);
     } else {
       setLocalMessages([]);
     }
@@ -163,49 +167,16 @@ const ChatRoom = () => {
       
       console.log("Sending message:", newMessage);
       
-      // Optimistically add message to local state first for immediate feedback
-      const optimisticMessage = {
-        _id: `temp-${Date.now()}`,
-        content: messageText,
-        createdAt: new Date(),
-        sender: {
-          _id: user._id,
-          name: user.name,
-          role: user.role
-        },
-        receiver: {
-          _id: userId,
-          name: otherUser?.name || "User",
-          role: otherUser?.role || "unknown"
-        },
-        isRead: false,
-        isOptimistic: true // Flag to identify this is an optimistic update
-      };
-      
-      setLocalMessages(prevMessages => [...prevMessages, optimisticMessage]);
+      // Reset text input immediately for better UX
       setMessageText("");
       
-      // Then dispatch to server
+      // Dispatch to send via socket
       dispatch(sendMessage(newMessage))
         .unwrap()
-        .then(response => {
-          console.log("Message sent successfully:", response);
-          
-          // Remove optimistic message and add real one from server
-          setLocalMessages(prevMessages => 
-            prevMessages
-              .filter(msg => msg._id !== optimisticMessage._id)
-              .concat(response.data)
-          );
-        })
         .catch(err => {
           console.error("Send message error:", err);
           setLocalError("Failed to send message. Please try again.");
           
-          // Remove the optimistic message on failure
-          setLocalMessages(prevMessages => 
-            prevMessages.filter(msg => msg._id !== optimisticMessage._id)
-          );
           // Restore the message text so user can try again
           setMessageText(messageText);
         });
@@ -213,8 +184,13 @@ const ChatRoom = () => {
   };
 
   const formatTime = (timestamp) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch (err) {
+      console.error("Error formatting time:", err);
+      return "Unknown time";
+    }
   };
 
   // Check for missing userId
@@ -266,29 +242,44 @@ const ChatRoom = () => {
               {(error || localError) && (
                 <div className="alert alert-danger" role="alert">
                   {error || localError}
+                  <button 
+                    className="btn-close" 
+                    onClick={() => setLocalError(null)} 
+                    aria-label="Close"
+                  ></button>
                 </div>
               )}
 
               <div className="chat-messages">
                 {localMessages.length > 0 ? (
                   localMessages.map((message, index) => {
-                    const isSentByMe = message.sender && message.sender._id === user._id;
+                    const isSentByMe = message.sender && 
+                      (message.sender._id === user._id || message.sender === user._id);
                     const isOptimistic = message.isOptimistic;
+                    const messageId = message._id || `msg-${index}`;
 
                     return (
-                      <div key={message._id || index} className={`message ${isSentByMe ? "message-sent" : "message-received"}`}>
-                        <div className={`message-bubble ${isSentByMe ? "bg-primary text-white" : "bg-light"} ${isOptimistic ? "opacity-75" : ""}`}
-                             style={{
-                               padding: "10px 15px",
-                               borderRadius: "18px",
-                               marginBottom: "8px",
-                               maxWidth: "70%",
-                               alignSelf: isSentByMe ? "flex-end" : "flex-start",
-                               float: isSentByMe ? "right" : "left",
-                               clear: "both"
-                             }}>
+                      <div 
+                        key={messageId} 
+                        className={`message ${isSentByMe ? "message-sent" : "message-received"}`}
+                      >
+                        <div 
+                          className={`message-bubble ${isSentByMe ? "bg-primary text-white" : "bg-light"} ${isOptimistic ? "opacity-75" : ""}`}
+                          style={{
+                            padding: "10px 15px",
+                            borderRadius: "18px",
+                            marginBottom: "8px",
+                            maxWidth: "70%",
+                            alignSelf: isSentByMe ? "flex-end" : "flex-start",
+                            float: isSentByMe ? "right" : "left",
+                            clear: "both"
+                          }}
+                        >
                           <div className="message-text">{message.content}</div>
-                          <div className="message-time" style={{ fontSize: "0.75rem", opacity: 0.8, textAlign: "right" }}>
+                          <div 
+                            className="message-time" 
+                            style={{ fontSize: "0.75rem", opacity: 0.8, textAlign: "right" }}
+                          >
                             {formatTime(message.createdAt)}
                             {isSentByMe && (
                               <span className="ms-1">

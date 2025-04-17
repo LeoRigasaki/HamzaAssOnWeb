@@ -279,6 +279,21 @@ exports.sendMessage = async (req, res) => {
 
     console.log(`Message sent from ${req.user.id} to ${receiver}: ${content.substring(0, 30)}...`);
 
+    // Check for active socket connection to send real-time notification
+    // This will be a direct communication without needing to wait for the client to poll
+    if (global.io && global.sockets) {
+      // Get the sorted IDs to find conversation room
+      const ids = [req.user.id.toString(), receiver.toString()].sort();
+      const conversationRoom = `conversation:${ids[0]}_${ids[1]}`;
+      
+      // Send to the room and directly to the users
+      if (global.io.to) {
+        global.io.to(conversationRoom).emit('newMessage', populatedMessage);
+        global.io.to(req.user.id.toString()).emit('newMessage', populatedMessage);
+        global.io.to(receiver.toString()).emit('newMessage', populatedMessage);
+      }
+    }
+
     res.status(201).json({
       success: true,
       data: populatedMessage
@@ -317,6 +332,27 @@ exports.markMessagesAsRead = async (req, res) => {
     );
 
     console.log(`Marked ${result.nModified || result.modifiedCount || 0} messages as read from ${req.params.userId} to ${req.user.id}`);
+
+    // Notify the sender through socket if available
+    if (global.io && global.sockets) {
+      // Get the sorted IDs to find conversation room
+      const ids = [req.user.id.toString(), req.params.userId.toString()].sort();
+      const conversationRoom = `conversation:${ids[0]}_${ids[1]}`;
+      
+      // Send to the room and directly to the sender
+      if (global.io.to) {
+        global.io.to(conversationRoom).emit('messagesRead', {
+          by: req.user.id,
+          for: req.params.userId
+        });
+        
+        // Also send directly to the sender
+        global.io.to(req.params.userId.toString()).emit('messagesRead', {
+          by: req.user.id,
+          for: req.params.userId
+        });
+      }
+    }
 
     res.status(200).json({
       success: true,

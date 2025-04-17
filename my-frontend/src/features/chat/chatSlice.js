@@ -91,18 +91,41 @@ export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageDa
       return thunkAPI.rejectWithValue("Receiver ID is required")
     }
     
-    const response = await axios.post(API_URL, messageData)
-
-    // Emit message via socket if connected
+    // Don't make an HTTP request if we're using sockets
+    // Only emit the message via socket
     if (socket && socket.connected) {
+      // We'll return early with optimistic data for Redux
+      // Socket will handle the actual server communication
+      const { user } = thunkAPI.getState().auth;
+      
       socket.emit("privateMessage", {
         receiver: messageData.receiver,
         content: messageData.content,
         session: messageData.session,
-      })
+      });
+      
+      // Return optimistic message data instead of making a server call
+      return {
+        success: true,
+        data: {
+          _id: `temp-${Date.now()}`,
+          content: messageData.content,
+          createdAt: new Date().toISOString(),
+          sender: {
+            _id: user._id,
+            name: user.name,
+            role: user.role
+          },
+          receiver: messageData.receiver,
+          isRead: false,
+          isOptimistic: true
+        }
+      };
     }
-
-    return response.data
+    
+    // Fallback to HTTP if socket is not available
+    const response = await axios.post(API_URL, messageData);
+    return response.data;
   } catch (error) {
     const message = error.response?.data?.error || error.message || "Something went wrong"
     return thunkAPI.rejectWithValue(message)
@@ -168,42 +191,73 @@ const chatSlice = createSlice({
     },
     receiveMessage: (state, action) => {
       const { message } = action.payload
-
-      // Add to appropriate message list
-      const senderId = message.sender._id || message.sender
-
+      
+      // Skip duplicate messages by checking for existing message IDs
+      const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
+      const senderId = typeof message.sender === 'object' ? message.sender._id : message.sender;
+      
+      // Determine which conversation this message belongs to
+      const otherUserId = senderId === state.currentChat ? senderId : receiverId;
+      
       // Create a new array if it doesn't exist
-      if (!state.messages[senderId]) {
-        state.messages[senderId] = []
+      if (!state.messages[otherUserId]) {
+        state.messages[otherUserId] = [];
       }
-
-      // Create a new array with the new message
-      state.messages[senderId] = [...state.messages[senderId], message]
+      
+      // Check if this message already exists (prevent duplicates)
+      const isDuplicate = state.messages[otherUserId].some(msg => 
+        // If it has the same ID and isn't a temporary ID
+        (msg._id && msg._id === message._id && !msg._id.toString().startsWith('temp-')) ||
+        // Or if it has the same content and timestamp (for optimistic updates)
+        (msg.content === message.content && 
+         new Date(msg.createdAt).getTime() === new Date(message.createdAt).getTime())
+      );
+      
+      // Only add if not a duplicate
+      if (!isDuplicate) {
+        // If this is a real message replacing an optimistic one, remove the optimistic one
+        if (message._id && !message._id.toString().startsWith('temp-')) {
+          state.messages[otherUserId] = state.messages[otherUserId].filter(msg => 
+            !msg.isOptimistic || msg.content !== message.content
+          );
+        }
+        
+        // Add the new message
+        state.messages[otherUserId] = [...state.messages[otherUserId], message];
+      }
 
       // If session message, add to session messages
       if (message.session) {
-        const sessionId = message.session._id || message.session
+        const sessionId = message.session._id || message.session;
 
         if (!state.sessionMessages[sessionId]) {
-          state.sessionMessages[sessionId] = []
+          state.sessionMessages[sessionId] = [];
         }
 
-        // Create a new array with the new message
-        state.sessionMessages[sessionId] = [...state.sessionMessages[sessionId], message]
+        // Check for duplicates in session messages too
+        const isSessionDuplicate = state.sessionMessages[sessionId].some(msg => 
+          (msg._id && msg._id === message._id && !msg._id.toString().startsWith('temp-')) ||
+          (msg.content === message.content && 
+           new Date(msg.createdAt).getTime() === new Date(message.createdAt).getTime())
+        );
+        
+        if (!isSessionDuplicate) {
+          state.sessionMessages[sessionId] = [...state.sessionMessages[sessionId], message];
+        }
       }
 
       // Update unread count if not current chat
       if (state.currentChat !== senderId) {
-        state.unreadCount += 1
+        state.unreadCount += 1;
       }
     },
     updateTypingStatus: (state, action) => {
-      const { user, isTyping } = action.payload
+      const { user, isTyping } = action.payload;
 
       // Find conversation and update typing status
       const conversationIndex = state.conversations.findIndex(
         (conv) => conv.user._id === user._id || conv.user === user._id
-      )
+      );
 
       if (conversationIndex !== -1) {
         // Create a new array with the updated conversation
@@ -214,7 +268,7 @@ const chatSlice = createSlice({
             isTyping,
           },
           ...state.conversations.slice(conversationIndex + 1),
-        ]
+        ];
       }
     },
   },
@@ -222,38 +276,38 @@ const chatSlice = createSlice({
     builder
       // Connect socket
       .addCase(connectSocket.pending, (state) => {
-        state.isLoading = true
+        state.isLoading = true;
       })
       .addCase(connectSocket.fulfilled, (state) => {
-        state.isLoading = false
-        state.isConnected = true
-        state.socket = "connected" // Can't store socket in state, just mark as connected
+        state.isLoading = false;
+        state.isConnected = true;
+        state.socket = "connected"; // Can't store socket in state, just mark as connected
       })
       .addCase(connectSocket.rejected, (state, action) => {
-        state.isLoading = false
-        state.error = action.payload
-        state.isConnected = false
+        state.isLoading = false;
+        state.error = action.payload;
+        state.isConnected = false;
       })
       // Disconnect socket
       .addCase(disconnectSocket.fulfilled, (state) => {
-        state.isConnected = false
-        state.socket = null
+        state.isConnected = false;
+        state.socket = null;
       })
       // Get conversations
       .addCase(getConversations.pending, (state) => {
-        state.isLoading = true
+        state.isLoading = true;
       })
       .addCase(getConversations.fulfilled, (state, action) => {
-        state.isLoading = false
-        state.conversations = action.payload.data
+        state.isLoading = false;
+        state.conversations = action.payload.data;
       })
       .addCase(getConversations.rejected, (state, action) => {
-        state.isLoading = false
-        state.error = action.payload
+        state.isLoading = false;
+        state.error = action.payload;
       })
       // Get messages
       .addCase(getMessages.pending, (state) => {
-        state.isLoading = true
+        state.isLoading = true;
       })
       .addCase(getMessages.fulfilled, (state, action) => {
         state.isLoading = false;
@@ -264,68 +318,83 @@ const chatSlice = createSlice({
         };
       })
       .addCase(getMessages.rejected, (state, action) => {
-        state.isLoading = false
-        state.error = action.payload
+        state.isLoading = false;
+        state.error = action.payload;
       })
       // Get session messages
       .addCase(getSessionMessages.pending, (state) => {
-        state.isLoading = true
+        state.isLoading = true;
       })
       .addCase(getSessionMessages.fulfilled, (state, action) => {
-        state.isLoading = false
+        state.isLoading = false;
         // Create a new sessionMessages object with the updated messages
         state.sessionMessages = {
           ...state.sessionMessages,
           [action.payload.sessionId]: action.payload.messages,
-        }
+        };
       })
       .addCase(getSessionMessages.rejected, (state, action) => {
-        state.isLoading = false
-        state.error = action.payload
+        state.isLoading = false;
+        state.error = action.payload;
       })
       // Send message
       .addCase(sendMessage.pending, (state) => {
-        state.isLoading = true
+        state.isLoading = true;
       })
       .addCase(sendMessage.fulfilled, (state, action) => {
-        state.isLoading = false
+        state.isLoading = false;
 
-        const message = action.payload.data
-        const receiverId = message.receiver._id || message.receiver
+        // Handle the optimistic message or actual server response
+        const message = action.payload.data;
+        const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
 
-        // Add to messages
+        // Add to messages if not already added by socket event
         if (!state.messages[receiverId]) {
-          state.messages[receiverId] = []
+          state.messages[receiverId] = [];
         }
-
-        // Create a new array with the new message
-        state.messages = {
-          ...state.messages,
-          [receiverId]: [...state.messages[receiverId], message],
+        
+        // Check if this message already exists to prevent duplicates
+        const isDuplicate = state.messages[receiverId].some(msg => 
+          (msg._id && msg._id === message._id) ||
+          (msg.isOptimistic && msg.content === message.content)
+        );
+        
+        if (!isDuplicate) {
+          state.messages = {
+            ...state.messages,
+            [receiverId]: [...state.messages[receiverId], message],
+          };
         }
 
         // If session message, add to session messages
         if (message.session) {
-          const sessionId = message.session._id || message.session
+          const sessionId = message.session._id || message.session;
 
           if (!state.sessionMessages[sessionId]) {
-            state.sessionMessages[sessionId] = []
+            state.sessionMessages[sessionId] = [];
           }
-
-          // Create a new array with the new message
-          state.sessionMessages = {
-            ...state.sessionMessages,
-            [sessionId]: [...state.sessionMessages[sessionId], message],
+          
+          // Check for duplicates in session messages too
+          const isSessionDuplicate = state.sessionMessages[sessionId].some(msg => 
+            (msg._id && msg._id === message._id) ||
+            (msg.isOptimistic && msg.content === message.content)
+          );
+          
+          if (!isSessionDuplicate) {
+            state.sessionMessages = {
+              ...state.sessionMessages,
+              [sessionId]: [...state.sessionMessages[sessionId], message],
+            };
           }
         }
       })
       .addCase(sendMessage.rejected, (state, action) => {
-        state.isLoading = false
-        state.error = action.payload
+        state.isLoading = false;
+        state.error = action.payload;
       })
       // Mark messages as read
       .addCase(markMessagesAsRead.fulfilled, (state, action) => {
-        const userId = action.payload.userId
+        const userId = action.payload.userId;
 
         // Update conversations
         state.conversations = state.conversations.map((conv) => {
@@ -337,10 +406,10 @@ const chatSlice = createSlice({
                 ...conv.lastMessage,
                 isRead: true,
               },
-            }
+            };
           }
-          return conv
-        })
+          return conv;
+        });
 
         // Update messages
         if (state.messages[userId]) {
@@ -351,20 +420,20 @@ const chatSlice = createSlice({
               ...msg,
               isRead: true,
             })),
-          }
+          };
         }
       })
       // Get unread count
       .addCase(getUnreadCount.fulfilled, (state, action) => {
-        state.unreadCount = action.payload.data.count
-      })
+        state.unreadCount = action.payload.data.count;
+      });
   },
-})
+});
 
-export const { reset, setCurrentChat, receiveMessage, updateTypingStatus } = chatSlice.actions
-export default chatSlice.reducer
+export const { reset, setCurrentChat, receiveMessage, updateTypingStatus } = chatSlice.actions;
+export default chatSlice.reducer;
 
-// Socket event listeners
+// Socket event listeners setup helper
 export const setupSocketListeners = (socket, dispatch) => {
   if (!socket) return;
 
@@ -380,12 +449,17 @@ export const setupSocketListeners = (socket, dispatch) => {
     removeListener("userStoppedTyping");
     removeListener("messagesRead");
     removeListener("sessionStatusChanged");
+    removeListener("conversationJoined");
+    removeListener("userLeftConversation");
   }
 
   // Add new listeners
   socket.on("newMessage", (message) => {
-    console.log("Received Message: ", message);
-    dispatch(receiveMessage({ message }));
+    console.log("Socket received new message:", message);
+    // Only dispatch if this is a real message with an _id
+    if (message && message._id) {
+      dispatch(receiveMessage({ message }));
+    }
   });
 
   socket.on("userTyping", (data) => {
@@ -401,8 +475,15 @@ export const setupSocketListeners = (socket, dispatch) => {
     dispatch(getConversations());
   });
 
+  socket.on("conversationJoined", (data) => {
+    console.log("Joined conversation:", data);
+  });
+
+  socket.on("userLeftConversation", (data) => {
+    console.log("User left conversation:", data.userId);
+  });
+
   socket.on("sessionStatusChanged", (data) => {
-    // Could dispatch an action to update session status
     console.log("Session status changed:", data);
   });
 
@@ -414,4 +495,4 @@ export const setupSocketListeners = (socket, dispatch) => {
   socket.on("error", (error) => {
     console.error("Socket error:", error);
   });
-}
+};
