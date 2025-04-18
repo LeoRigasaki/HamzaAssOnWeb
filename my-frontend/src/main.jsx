@@ -30,26 +30,38 @@ window.io = {
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
+      transports: ['websocket', 'polling'], // Explicitly set transports
     });
     
     // Store socket globally for component access
     window.io.socket = socket;
-    window.socket = socket; // Alternate reference for backward compatibility
     
     // Setup global socket events
     socket.on("connect", () => {
-      console.log("Socket connected globally");
+      console.log("Socket connected globally with ID:", socket.id);
       window.io.connected = true;
     });
     
-    socket.on("disconnect", () => {
-      console.log("Socket disconnected globally");
+    socket.on("disconnect", (reason) => {
+      console.log("Socket disconnected globally. Reason:", reason);
       window.io.connected = false;
     });
     
     socket.on("connect_error", (error) => {
-      console.error("Socket connection error globally:", error);
+      console.error("Socket connection error globally:", error.message);
       window.io.connected = false;
+    });
+    
+    // Add a specific handler for new messages at the global level
+    socket.on("newMessage", (message) => {
+      console.log("New message received globally:", message);
+      // You can dispatch to Redux here if needed
+      if (store && message) {
+        store.dispatch({
+          type: "chat/receiveMessage",
+          payload: { message }
+        });
+      }
     });
     
     return socket;
@@ -62,9 +74,15 @@ window.io = {
     }
   },
   socket: null,
-  connected: false,
-  sockets: {} // For storing multiple socket connections if needed
+  connected: false
 };
+
+// Try to connect with stored token on startup
+const token = localStorage.getItem("token");
+if (token) {
+  console.log("Found token, attempting to connect socket on app start");
+  window.io.connect(token);
+}
 
 const container = document.getElementById("root")
 const root = createRoot(container)

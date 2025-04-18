@@ -4,7 +4,6 @@ import { API_URLS, SOCKET_URL } from "../../config/api"
 import io from "socket.io-client"
 
 const API_URL = API_URLS.MESSAGES
-let socket
 
 // Connect to socket
 export const connectSocket = createAsyncThunk("chat/connectSocket", async (_, thunkAPI) => {
@@ -15,17 +14,16 @@ export const connectSocket = createAsyncThunk("chat/connectSocket", async (_, th
       return thunkAPI.rejectWithValue("No token found")
     }
 
-    // Create socket connection with auth token
-    socket = io(SOCKET_URL, {
-      auth: {
-        token,
-      },
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-    })
+    // Use the global socket instance if available
+    if (window.io && window.io.socket) {
+      return { connected: true };
+    }
 
-    return socket
+    // Create new socket connection with auth token
+    const socket = window.io.connect(token);
+    
+    // Return success, but we don't store the socket in redux state
+    return { connected: true };
   } catch (error) {
     const message = error.message || "Failed to connect to socket"
     return thunkAPI.rejectWithValue(message)
@@ -35,8 +33,8 @@ export const connectSocket = createAsyncThunk("chat/connectSocket", async (_, th
 // Disconnect socket
 export const disconnectSocket = createAsyncThunk("chat/disconnectSocket", async (_, thunkAPI) => {
   try {
-    if (socket) {
-      socket.disconnect()
+    if (window.io) {
+      window.io.disconnect();
     }
     return true
   } catch (error) {
@@ -70,20 +68,6 @@ export const getMessages = createAsyncThunk("chat/getMessages", async (userId, t
   }
 })
 
-// Get session messages
-export const getSessionMessages = createAsyncThunk("chat/getSessionMessages", async (sessionId, thunkAPI) => {
-  try {
-    if (!sessionId) {
-      return thunkAPI.rejectWithValue("Session ID is required")
-    }
-    const response = await axios.get(`${API_URL}/session/${sessionId}`)
-    return { sessionId, messages: response.data.data }
-  } catch (error) {
-    const message = error.response?.data?.error || error.message || "Something went wrong"
-    return thunkAPI.rejectWithValue(message)
-  }
-})
-
 // Send message
 export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageData, thunkAPI) => {
   try {
@@ -91,35 +75,36 @@ export const sendMessage = createAsyncThunk("chat/sendMessage", async (messageDa
       return thunkAPI.rejectWithValue("Receiver ID is required")
     }
     
-    // Don't make an HTTP request if we're using sockets
-    // Only emit the message via socket
-    if (socket && socket.connected) {
-      // We'll return early with optimistic data for Redux
-      // Socket will handle the actual server communication
-      const { user } = thunkAPI.getState().auth;
-      
-      socket.emit("privateMessage", {
+    const { user } = thunkAPI.getState().auth;
+    
+    // Create optimistic response
+    const optimisticMessage = {
+      _id: `temp-${Date.now()}`,
+      content: messageData.content,
+      createdAt: new Date().toISOString(),
+      sender: {
+        _id: user._id,
+        name: user.name,
+        role: user.role
+      },
+      receiver: messageData.receiver,
+      isRead: false,
+      isOptimistic: true
+    };
+    
+    // If socket is connected, use that instead of HTTP
+    if (window.io && window.io.socket && window.io.connected) {
+      // Emit message via socket
+      window.io.socket.emit("privateMessage", {
         receiver: messageData.receiver,
         content: messageData.content,
         session: messageData.session,
       });
       
-      // Return optimistic message data instead of making a server call
+      // Return optimistic message without waiting for server response
       return {
         success: true,
-        data: {
-          _id: `temp-${Date.now()}`,
-          content: messageData.content,
-          createdAt: new Date().toISOString(),
-          sender: {
-            _id: user._id,
-            name: user.name,
-            role: user.role
-          },
-          receiver: messageData.receiver,
-          isRead: false,
-          isOptimistic: true
-        }
+        data: optimisticMessage
       };
     }
     
@@ -141,11 +126,11 @@ export const markMessagesAsRead = createAsyncThunk("chat/markMessagesAsRead", as
     
     const response = await axios.put(`${API_URL}/read/${userId}`, {})
 
-    // Emit read receipt via socket
-    if (socket && socket.connected) {
-      socket.emit("markAsRead", {
+    // Also emit via socket if connected
+    if (window.io && window.io.socket && window.io.connected) {
+      window.io.socket.emit("markAsRead", {
         sender: userId,
-      })
+      });
     }
 
     return { userId, data: response.data }
@@ -167,7 +152,6 @@ export const getUnreadCount = createAsyncThunk("chat/getUnreadCount", async (_, 
 })
 
 const initialState = {
-  socket: null,
   isConnected: false,
   conversations: [],
   messages: {},
@@ -190,64 +174,74 @@ const chatSlice = createSlice({
       state.currentChat = action.payload
     },
     receiveMessage: (state, action) => {
-      const { message } = action.payload
+      const { message } = action.payload;
       
-      // Skip duplicate messages by checking for existing message IDs
+      if (!message) return;
+      
+      console.log("Processing message in Redux:", message);
+      
+      // Extract sender and receiver IDs, handling both object and string formats
       const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
       const senderId = typeof message.sender === 'object' ? message.sender._id : message.sender;
       
-      // Determine which conversation this message belongs to
-      const otherUserId = senderId === state.currentChat ? senderId : receiverId;
+      // Get current user ID from state (not from store)
+      // If we're in a conversation, currentChat will be the other user's ID
+      const currentUserId = state.currentChat;
       
-      // Create a new array if it doesn't exist
-      if (!state.messages[otherUserId]) {
-        state.messages[otherUserId] = [];
+      // If we can't determine the current user, try to infer from the message
+      // This is a fallback mechanism only
+      let conversationId;
+      
+      if (state.currentChat) {
+        // We know which conversation we're in
+        if (senderId === state.currentChat || receiverId === state.currentChat) {
+          conversationId = state.currentChat;
+        }
+      } else {
+        // Determine conversation ID based on message participants
+        if (receiverId) {
+          conversationId = receiverId;
+        } else if (senderId) {
+          conversationId = senderId;
+        } else {
+          // Can't determine where to store the message
+          return;
+        }
       }
       
-      // Check if this message already exists (prevent duplicates)
-      const isDuplicate = state.messages[otherUserId].some(msg => 
-        // If it has the same ID and isn't a temporary ID
-        (msg._id && msg._id === message._id && !msg._id.toString().startsWith('temp-')) ||
-        // Or if it has the same content and timestamp (for optimistic updates)
+      console.log(`Storing message in conversation: ${conversationId}`);
+      
+      // Initialize the messages array for this conversation if it doesn't exist
+      if (!state.messages[conversationId]) {
+        state.messages[conversationId] = [];
+      }
+      
+      // Check if this message is a duplicate to avoid adding it twice
+      const isDuplicate = state.messages[conversationId].some(msg => 
+        // Check by ID if available (for server messages)
+        (msg._id && message._id && msg._id === message._id) ||
+        // Or by content and timestamp (for optimistic updates)
         (msg.content === message.content && 
-         new Date(msg.createdAt).getTime() === new Date(message.createdAt).getTime())
+         Math.abs(new Date(msg.createdAt) - new Date(message.createdAt)) < 1000)
       );
       
       // Only add if not a duplicate
       if (!isDuplicate) {
-        // If this is a real message replacing an optimistic one, remove the optimistic one
-        if (message._id && !message._id.toString().startsWith('temp-')) {
-          state.messages[otherUserId] = state.messages[otherUserId].filter(msg => 
+        // If this is a server message replacing an optimistic one, remove the optimistic one
+        if (message._id && !String(message._id).startsWith('temp-')) {
+          state.messages[conversationId] = state.messages[conversationId].filter(msg => 
             !msg.isOptimistic || msg.content !== message.content
           );
         }
         
         // Add the new message
-        state.messages[otherUserId] = [...state.messages[otherUserId], message];
+        state.messages[conversationId].push(message);
+      } else {
+        console.log("Skipping duplicate message");
       }
-
-      // If session message, add to session messages
-      if (message.session) {
-        const sessionId = message.session._id || message.session;
-
-        if (!state.sessionMessages[sessionId]) {
-          state.sessionMessages[sessionId] = [];
-        }
-
-        // Check for duplicates in session messages too
-        const isSessionDuplicate = state.sessionMessages[sessionId].some(msg => 
-          (msg._id && msg._id === message._id && !msg._id.toString().startsWith('temp-')) ||
-          (msg.content === message.content && 
-           new Date(msg.createdAt).getTime() === new Date(message.createdAt).getTime())
-        );
-        
-        if (!isSessionDuplicate) {
-          state.sessionMessages[sessionId] = [...state.sessionMessages[sessionId], message];
-        }
-      }
-
-      // Update unread count if not current chat
-      if (state.currentChat !== senderId) {
+    
+      // Update unread count if receiving a new message not from current user
+      if (state.currentChat !== senderId && senderId !== receiverId) {
         state.unreadCount += 1;
       }
     },
@@ -271,6 +265,29 @@ const chatSlice = createSlice({
         ];
       }
     },
+    // Add a direct way to update message read status
+    markMessageReadByReceiver: (state, action) => {
+      const { userId } = action.payload;
+      
+      if (state.messages[userId]) {
+        state.messages[userId] = state.messages[userId].map(msg => ({
+          ...msg,
+          isRead: true
+        }));
+      }
+      
+      // Also update conversations list
+      state.conversations = state.conversations.map(conv => {
+        if (conv.user._id === userId || conv.user === userId) {
+          return {
+            ...conv,
+            unreadCount: 0,
+            lastMessage: conv.lastMessage ? { ...conv.lastMessage, isRead: true } : null
+          };
+        }
+        return conv;
+      });
+    }
   },
   extraReducers: (builder) => {
     builder
@@ -281,7 +298,6 @@ const chatSlice = createSlice({
       .addCase(connectSocket.fulfilled, (state) => {
         state.isLoading = false;
         state.isConnected = true;
-        state.socket = "connected"; // Can't store socket in state, just mark as connected
       })
       .addCase(connectSocket.rejected, (state, action) => {
         state.isLoading = false;
@@ -291,7 +307,6 @@ const chatSlice = createSlice({
       // Disconnect socket
       .addCase(disconnectSocket.fulfilled, (state) => {
         state.isConnected = false;
-        state.socket = null;
       })
       // Get conversations
       .addCase(getConversations.pending, (state) => {
@@ -311,6 +326,7 @@ const chatSlice = createSlice({
       })
       .addCase(getMessages.fulfilled, (state, action) => {
         state.isLoading = false;
+        
         // Create a new messages object with the updated messages for this userId
         state.messages = {
           ...state.messages,
@@ -318,22 +334,6 @@ const chatSlice = createSlice({
         };
       })
       .addCase(getMessages.rejected, (state, action) => {
-        state.isLoading = false;
-        state.error = action.payload;
-      })
-      // Get session messages
-      .addCase(getSessionMessages.pending, (state) => {
-        state.isLoading = true;
-      })
-      .addCase(getSessionMessages.fulfilled, (state, action) => {
-        state.isLoading = false;
-        // Create a new sessionMessages object with the updated messages
-        state.sessionMessages = {
-          ...state.sessionMessages,
-          [action.payload.sessionId]: action.payload.messages,
-        };
-      })
-      .addCase(getSessionMessages.rejected, (state, action) => {
         state.isLoading = false;
         state.error = action.payload;
       })
@@ -345,45 +345,25 @@ const chatSlice = createSlice({
         state.isLoading = false;
 
         // Handle the optimistic message or actual server response
-        const message = action.payload.data;
-        const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
+        if (action.payload && action.payload.data) {
+          const message = action.payload.data;
+          const receiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
 
-        // Add to messages if not already added by socket event
-        if (!state.messages[receiverId]) {
-          state.messages[receiverId] = [];
-        }
-        
-        // Check if this message already exists to prevent duplicates
-        const isDuplicate = state.messages[receiverId].some(msg => 
-          (msg._id && msg._id === message._id) ||
-          (msg.isOptimistic && msg.content === message.content)
-        );
-        
-        if (!isDuplicate) {
-          state.messages = {
-            ...state.messages,
-            [receiverId]: [...state.messages[receiverId], message],
-          };
-        }
-
-        // If session message, add to session messages
-        if (message.session) {
-          const sessionId = message.session._id || message.session;
-
-          if (!state.sessionMessages[sessionId]) {
-            state.sessionMessages[sessionId] = [];
+          // Add to messages if not already added by socket event
+          if (!state.messages[receiverId]) {
+            state.messages[receiverId] = [];
           }
           
-          // Check for duplicates in session messages too
-          const isSessionDuplicate = state.sessionMessages[sessionId].some(msg => 
-            (msg._id && msg._id === message._id) ||
+          // Check if this message already exists to prevent duplicates
+          const isDuplicate = state.messages[receiverId].some(msg => 
+            (msg._id && message._id && msg._id === message._id) ||
             (msg.isOptimistic && msg.content === message.content)
           );
           
-          if (!isSessionDuplicate) {
-            state.sessionMessages = {
-              ...state.sessionMessages,
-              [sessionId]: [...state.sessionMessages[sessionId], message],
+          if (!isDuplicate) {
+            state.messages = {
+              ...state.messages,
+              [receiverId]: [...state.messages[receiverId], message],
             };
           }
         }
@@ -396,7 +376,7 @@ const chatSlice = createSlice({
       .addCase(markMessagesAsRead.fulfilled, (state, action) => {
         const userId = action.payload.userId;
 
-        // Update conversations
+        // Update conversations to clear unread counts
         state.conversations = state.conversations.map((conv) => {
           if (conv.user._id === userId || conv.user === userId) {
             return {
@@ -411,9 +391,8 @@ const chatSlice = createSlice({
           return conv;
         });
 
-        // Update messages
+        // Update the read status of all messages in this conversation
         if (state.messages[userId]) {
-          // Create a new array with all messages marked as read
           state.messages = {
             ...state.messages,
             [userId]: state.messages[userId].map((msg) => ({
@@ -430,69 +409,12 @@ const chatSlice = createSlice({
   },
 });
 
-export const { reset, setCurrentChat, receiveMessage, updateTypingStatus } = chatSlice.actions;
+export const { 
+  reset, 
+  setCurrentChat, 
+  receiveMessage, 
+  updateTypingStatus,
+  markMessageReadByReceiver
+} = chatSlice.actions;
+
 export default chatSlice.reducer;
-
-// Socket event listeners setup helper
-export const setupSocketListeners = (socket, dispatch) => {
-  if (!socket) return;
-
-  // Check if socket has the off method before using it
-  const removeListener = socket.off 
-    ? (event) => socket.off(event)
-    : () => console.log('Socket.off not available');
-
-  // Remove any existing listeners to prevent duplicates
-  if (socket.off) {
-    removeListener("newMessage");
-    removeListener("userTyping");
-    removeListener("userStoppedTyping");
-    removeListener("messagesRead");
-    removeListener("sessionStatusChanged");
-    removeListener("conversationJoined");
-    removeListener("userLeftConversation");
-  }
-
-  // Add new listeners
-  socket.on("newMessage", (message) => {
-    console.log("Socket received new message:", message);
-    // Only dispatch if this is a real message with an _id
-    if (message && message._id) {
-      dispatch(receiveMessage({ message }));
-    }
-  });
-
-  socket.on("userTyping", (data) => {
-    dispatch(updateTypingStatus({ user: data.user, isTyping: true }));
-  });
-
-  socket.on("userStoppedTyping", (data) => {
-    dispatch(updateTypingStatus({ user: data.user, isTyping: false }));
-  });
-
-  socket.on("messagesRead", () => {
-    // Refresh conversations to update read status
-    dispatch(getConversations());
-  });
-
-  socket.on("conversationJoined", (data) => {
-    console.log("Joined conversation:", data);
-  });
-
-  socket.on("userLeftConversation", (data) => {
-    console.log("User left conversation:", data.userId);
-  });
-
-  socket.on("sessionStatusChanged", (data) => {
-    console.log("Session status changed:", data);
-  });
-
-  // Add error handling
-  socket.on("connect_error", (error) => {
-    console.error("Socket connection error:", error);
-  });
-
-  socket.on("error", (error) => {
-    console.error("Socket error:", error);
-  });
-};

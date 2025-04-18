@@ -6,7 +6,6 @@ import {
   sendMessage,
   markMessagesAsRead,
   connectSocket,
-  setupSocketListeners,
   receiveMessage,
   setCurrentChat
 } from "../../features/chat/chatSlice";
@@ -16,7 +15,7 @@ const ChatRoom = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { user } = useSelector((state) => state.auth);
-  const { messages = {}, isLoading, error, isConnected, socket } = useSelector((state) => state.chat);
+  const { messages, isLoading, error, isConnected } = useSelector((state) => state.chat);
 
   const [messageText, setMessageText] = useState("");
   const [otherUser, setOtherUser] = useState(null);
@@ -25,13 +24,7 @@ const ChatRoom = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const messagesEndRef = useRef(null);
   const socketInitialized = useRef(false);
-
-  // Debug logging
-  useEffect(() => {
-    console.log("ChatRoom rendered with userId:", userId);
-    console.log("Connection status:", connectionStatus);
-    console.log("isConnected from Redux:", isConnected);
-  }, [userId, connectionStatus, isConnected]);
+  const socketRef = useRef(null);
 
   // Set current chat in Redux
   useEffect(() => {
@@ -42,145 +35,215 @@ const ChatRoom = () => {
     // Clean up when component unmounts
     return () => {
       dispatch(setCurrentChat(null));
+      
+      // Leave conversation when unmounting
+      if (socketRef.current) {
+        socketRef.current.emit("leaveConversation", userId);
+      }
     };
   }, [dispatch, userId]);
 
   // Connect to socket when component mounts
   useEffect(() => {
-    if (!isConnected && userId) {
-      console.log("Attempting to connect socket");
-      setConnectionStatus("connecting");
-      dispatch(connectSocket())
-        .unwrap()
-        .then(() => {
-          console.log("Socket connected successfully");
+    const connectToSocket = async () => {
+      if (!isConnected && userId) {
+        setConnectionStatus("connecting");
+        try {
+          await dispatch(connectSocket()).unwrap();
           setConnectionStatus("connected");
-        })
-        .catch((error) => {
+          
+          // Use the global socket instance
+          if (window.io && window.io.socket) {
+            socketRef.current = window.io.socket;
+            
+            // Join conversation room
+            socketRef.current.emit("joinConversation", userId);
+            
+            // Set up event listeners
+            setupSocketListeners();
+            socketInitialized.current = true;
+          }
+        } catch (error) {
           console.error("Socket connection error:", error);
           setLocalError("Failed to connect to chat server. Please try again later.");
           setConnectionStatus("error");
-        });
-    } else if (isConnected) {
-      setConnectionStatus("connected");
-    }
+        }
+      } else if (isConnected) {
+        setConnectionStatus("connected");
+        
+        // Use the global socket if already connected
+        if (window.io && window.io.socket) {
+          socketRef.current = window.io.socket;
+          
+          // Join conversation room
+          socketRef.current.emit("joinConversation", userId);
+          
+          // Set up event listeners
+          setupSocketListeners();
+          socketInitialized.current = true;
+        }
+      }
+    };
+    
+    connectToSocket();
+    
+    return () => {
+      cleanupSocketListeners();
+    };
   }, [dispatch, isConnected, userId]);
 
-  // Set up socket listeners when socket is connected
-  useEffect(() => {
-    if (connectionStatus === "connected" && userId && !socketInitialized.current) {
-      console.log("Setting up socket listeners");
+  // Setup socket listeners
+  const setupSocketListeners = () => {
+    if (!socketRef.current) return;
+    
+    // Clean up existing listeners first
+    cleanupSocketListeners();
+    
+    // Add new message handler
+    socketRef.current.on("newMessage", handleNewMessage);
+    
+    // Add debugging handlers
+    socketRef.current.on("connect", () => {
+      console.log("Socket connected in ChatRoom");
+      setConnectionStatus("connected");
+    });
+    
+    socketRef.current.on("disconnect", () => {
+      console.log("Socket disconnected in ChatRoom");
+      setConnectionStatus("disconnected");
+    });
+    
+    socketRef.current.on("connect_error", (error) => {
+      console.error("Socket connection error in ChatRoom:", error);
+      setConnectionStatus("error");
+    });
+  };
+  
+  // Clean up socket listeners
+  const cleanupSocketListeners = () => {
+    if (!socketRef.current) return;
+    
+    socketRef.current.off("newMessage");
+    socketRef.current.off("connect");
+    socketRef.current.off("disconnect");
+    socketRef.current.off("connect_error");
+  };
+  
+  // Handle new message from socket
+  const handleNewMessage = (message) => {
+    console.log("New message received via socket:", message);
+    
+    if (!message || !userId) return;
+    
+    // Extract IDs, handling both object and string formats
+    const messageSenderId = typeof message.sender === 'object' ? message.sender._id : message.sender;
+    const messageReceiverId = typeof message.receiver === 'object' ? message.receiver._id : message.receiver;
+    
+    // For this conversation, either:
+    // - Current user is the sender and the other user is the receiver
+    // - Current user is the receiver and the other user is the sender
+    const isRelevantToCurrentChat = 
+      (messageSenderId === userId || messageReceiverId === userId) && 
+      (messageSenderId === user._id || messageReceiverId === user._id);
+    
+    if (isRelevantToCurrentChat) {
+      // Dispatch to add to Redux store
+      dispatch(receiveMessage({ message }));
       
-      // Get the socket instance from the global variable
-      // This is a workaround since we can't store socket in Redux
-      const socketInstance = window.io?.sockets?.socket || window.socket;
-      
-      if (socketInstance) {
-        // Set up all the standard listeners using our helper
-        setupSocketListeners(socketInstance, dispatch);
+      // Also update local messages immediately for faster UI update
+      setLocalMessages(prevMessages => {
+        // Check if message already exists in local messages
+        const isDuplicate = prevMessages.some(msg => 
+          msg._id === message._id || 
+          (msg.content === message.content && Math.abs(new Date(msg.createdAt) - new Date(message.createdAt)) < 1000)
+        );
         
-        // Explicitly join this conversation room
-        console.log("Joining conversation with:", userId);
-        socketInstance.emit("joinConversation", userId);
-        
-        // Mark this component as having initialized sockets
-        socketInitialized.current = true;
-      } else {
-        console.warn("Could not find socket instance for setting up listeners");
-      }
-      
-      // Return cleanup function
-      return () => {
-        if (socketInstance) {
-          console.log("Leaving conversation with:", userId);
-          socketInstance.emit("leaveConversation", userId);
-          socketInitialized.current = false;
+        if (!isDuplicate) {
+          const newMessages = [...prevMessages, message].sort((a, b) => 
+            new Date(a.createdAt) - new Date(b.createdAt)
+          );
+          return newMessages;
         }
-      };
+        return prevMessages;
+      });
+      
+      // Mark messages as read if they're from the other user
+      if (messageSenderId === userId) {
+        dispatch(markMessagesAsRead(userId));
+      }
     }
-  }, [dispatch, connectionStatus, userId]);
-
-  // Update local messages when messages from store change
-  useEffect(() => {
-    if (messages && messages[userId]) {
-      console.log("Updating local messages from Redux store");
-      // Sort messages by creation date to ensure proper order
-      const sortedMessages = [...messages[userId]].sort((a, b) => 
-        new Date(a.createdAt) - new Date(b.createdAt)
-      );
-      setLocalMessages(sortedMessages);
-    } else {
-      setLocalMessages([]);
-    }
-  }, [messages, userId]);
+  };  
 
   // Load messages when userId changes
   useEffect(() => {
     if (userId) {
-      console.log("Fetching messages for user:", userId);
       dispatch(getMessages(userId))
         .unwrap()
         .then(result => {
-          console.log("Messages fetched successfully:", result);
-          
           // Mark messages as read
           return dispatch(markMessagesAsRead(userId)).unwrap();
         })
-        .then(() => {
-          console.log("Messages marked as read");
-        })
         .catch(error => {
-          console.error("Error in message operations:", error);
           setLocalError("Failed to load messages. Please try again.");
         });
     }
   }, [dispatch, userId]);
+
+  // Update local messages when messages from store change
+  useEffect(() => {
+    if (messages && messages[userId]) {
+      console.log("Updating local messages from Redux store. Count:", messages[userId].length);
+      
+      // Sort messages by creation date to ensure proper order
+      const sortedMessages = [...messages[userId]].sort((a, b) => 
+        new Date(a.createdAt) - new Date(b.createdAt)
+      );
+      
+      setLocalMessages(sortedMessages);
+      
+      // Try to set other user info if not already set
+      if (!otherUser && sortedMessages.length > 0) {
+        for (const message of sortedMessages) {
+          if (message.sender && typeof message.sender === 'object' && message.sender._id === userId) {
+            setOtherUser(message.sender);
+            break;
+          } else if (message.receiver && typeof message.receiver === 'object' && message.receiver._id === userId) {
+            setOtherUser(message.receiver);
+            break;
+          }
+        }
+      }
+    } else if (!messages[userId]) {
+      setLocalMessages([]);
+    }
+  }, [messages, userId, otherUser]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [localMessages]);
 
-  // Fetch other user's info
-  useEffect(() => {
-    if (localMessages.length > 0) {
-      for (const message of localMessages) {
-        if (message.sender && message.sender._id === userId) {
-          setOtherUser(message.sender);
-          break;
-        } else if (message.receiver && message.receiver._id === userId) {
-          setOtherUser(message.receiver);
-          break;
-        }
-      }
-    }
-  }, [localMessages, userId]);
-
   const handleSendMessage = (e) => {
     e.preventDefault();
 
-    if (messageText.trim() && userId) {
-      const newMessage = {
-        receiver: userId,
-        content: messageText,
-      };
-      
-      console.log("Sending message:", newMessage);
-      
-      // Reset text input immediately for better UX
-      setMessageText("");
-      
-      // Dispatch to send via socket
-      dispatch(sendMessage(newMessage))
-        .unwrap()
-        .catch(err => {
-          console.error("Send message error:", err);
-          setLocalError("Failed to send message. Please try again.");
-          
-          // Restore the message text so user can try again
-          setMessageText(messageText);
-        });
-    }
+    if (!messageText.trim() || !userId) return;
+    
+    const messageData = {
+      receiver: userId,
+      content: messageText,
+    };
+    
+    // Reset text input immediately for better UX
+    setMessageText("");
+    
+    // Dispatch to send message
+    dispatch(sendMessage(messageData))
+      .unwrap()
+      .catch(err => {
+        console.error("Send message error:", err);
+        setLocalError("Failed to send message. Please try again.");
+        setMessageText(messageText);
+      });
   };
 
   const formatTime = (timestamp) => {
@@ -188,7 +251,6 @@ const ChatRoom = () => {
       const date = new Date(timestamp);
       return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     } catch (err) {
-      console.error("Error formatting time:", err);
       return "Unknown time";
     }
   };
