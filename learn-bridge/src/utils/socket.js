@@ -1,3 +1,4 @@
+// Enhanced socket.js implementation
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User.model');
@@ -12,7 +13,8 @@ const initializeSocket = (server) => {
       methods: ["GET", "POST"],
       credentials: true,
       allowedHeaders: ["Content-Type", "Authorization"]
-    }
+    },
+    transports: ['websocket', 'polling'], // Ensure both transports are enabled
   });
 
   // Socket.io middleware for authentication
@@ -39,7 +41,7 @@ const initializeSocket = (server) => {
 
       // Attach user to socket
       socket.user = user;
-      console.log(`Socket authenticated: ${user.name} (${user._id})`);
+      console.log(`Socket authenticated: ${user.name} (${user._id}), socket ID: ${socket.id}`);
       next();
     } catch (err) {
       console.log("Socket authentication error:", err.message);
@@ -47,54 +49,29 @@ const initializeSocket = (server) => {
     }
   });
 
+  // Store active sockets
+  const activeSockets = new Map();
+  
+  // Make IO instance available globally
+  global.io = io;
+  global.activeSockets = activeSockets;
+
   // Connection event
   io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.user.name} (${socket.user._id})`);
+    console.log(`User connected: ${socket.user.name} (${socket.user._id}), socket ID: ${socket.id}`);
 
-    // Make socket available globally for debugging and access from other modules
-    if (typeof window !== 'undefined') {
-      window.socket = socket;
-    }
-    
-    // Add to global namespace for server-side access
-    if (!global.io) {
-      global.io = io;
-    }
-    
-    if (!global.sockets) {
-      global.sockets = {};
-    }
-    
-    // Store socket reference with user ID as key
-    global.sockets[socket.user._id.toString()] = socket;
-
-    // Join personal room based on user ID
+    // Store socket in active sockets map
     const userId = socket.user._id.toString();
+    activeSockets.set(userId, socket);
+    
+    // Join personal room based on user ID
     socket.join(userId);
     console.log(`User ${socket.user.name} joined personal room: ${userId}`);
 
     // Let everyone know this user is online
     socket.broadcast.emit('userOnline', { userId });
 
-    // Handle joining session room
-    socket.on('joinSession', (sessionId) => {
-      if (sessionId) {
-        socket.join(`session:${sessionId}`);
-        console.log(`${socket.user.name} joined session room: ${sessionId}`);
-      } else {
-        console.log(`Invalid sessionId provided by ${socket.user.name}`);
-      }
-    });
-
-    // Handle leaving session room
-    socket.on('leaveSession', (sessionId) => {
-      if (sessionId) {
-        socket.leave(`session:${sessionId}`);
-        console.log(`${socket.user.name} left session room: ${sessionId}`);
-      }
-    });
-
-    // Get conversation room ID
+    // Helper function to get conversation room ID
     const getConversationRoomId = (user1Id, user2Id) => {
       // Sort IDs to ensure the same room regardless of who initiates
       const ids = [user1Id.toString(), user2Id.toString()].sort();
@@ -129,11 +106,6 @@ const initializeSocket = (server) => {
       const conversationRoom = getConversationRoomId(socket.user._id, userId);
       socket.leave(conversationRoom);
       console.log(`${socket.user.name} left conversation room: ${conversationRoom}`);
-      
-      // Notify the other user
-      io.to(userId).emit('userLeftConversation', {
-        userId: socket.user._id.toString()
-      });
     });
 
     // Handle private message
@@ -147,9 +119,6 @@ const initializeSocket = (server) => {
           return;
         }
 
-        // Log the message attempt
-        console.log(`Message attempt from ${socket.user._id} to ${receiver}: ${content.substring(0, 30)}...`);
-
         // Create message in database
         const message = await Message.create({
           sender: socket.user._id,
@@ -158,7 +127,7 @@ const initializeSocket = (server) => {
           session
         });
 
-        // Populate sender info
+        // Populate sender and receiver info
         const populatedMessage = await Message.findById(message._id)
           .populate({
             path: 'sender',
@@ -169,84 +138,25 @@ const initializeSocket = (server) => {
             select: 'name role'
           });
 
-        // Log the message created
-        console.log(`Message created with ID: ${populatedMessage._id}`);
-
         // Get conversation room ID
         const conversationRoom = getConversationRoomId(socket.user._id.toString(), receiver.toString());
         
-        // Log the room we're sending to
-        console.log(`Sending message to conversation room: ${conversationRoom}`);
+        // Log message details
+        console.log(`Message sent: From=${socket.user._id}, To=${receiver}, Room=${conversationRoom}, Content=${content.substring(0, 20)}...`);
 
-        // Emit to conversation room
+        // Emit to the conversation room
         io.to(conversationRoom).emit('newMessage', populatedMessage);
-
-        // Also emit directly to both users' personal rooms as a fallback
-        // This ensures messages are delivered even if one user isn't in the conversation room
+        
+        // Also emit directly to both users
         io.to(socket.user._id.toString()).emit('newMessage', populatedMessage);
         io.to(receiver.toString()).emit('newMessage', populatedMessage);
 
-        // If session is provided, emit to session room
-        if (session) {
-          io.to(`session:${session}`).emit('sessionMessage', populatedMessage);
-        }
-
         // Emit confirmation to sender
         socket.emit('messageSent', populatedMessage);
-
-        console.log(`Message sent from ${socket.user.name} to ${receiver}`);
       } catch (err) {
         console.error('Error sending message:', err);
         socket.emit('messageError', { error: err.message });
       }
-    });
-
-    // Handle typing indicator
-    socket.on('typing', (data) => {
-      const { receiver } = data;
-
-      if (!receiver) {
-        console.log("Invalid typing data:", data);
-        return;
-      }
-
-      const conversationRoom = getConversationRoomId(socket.user._id.toString(), receiver.toString());
-      socket.to(conversationRoom).emit('userTyping', {
-        user: socket.user._id,
-        name: socket.user.name
-      });
-    });
-
-    // Handle stop typing indicator
-    socket.on('stopTyping', (data) => {
-      const { receiver } = data;
-
-      if (!receiver) {
-        console.log("Invalid stopTyping data:", data);
-        return;
-      }
-      const conversationRoom = getConversationRoomId(socket.user._id.toString(), receiver.toString());
-      socket.to(conversationRoom).emit('userStoppedTyping', {
-        user: socket.user._id
-      });
-    });
-
-    // Handle session status updates
-    socket.on('sessionUpdate', (data) => {
-      const { sessionId, status } = data;
-
-      if (!sessionId || !status) {
-        console.log("Invalid sessionUpdate data:", data);
-        return;
-      }
-
-      io.to(`session:${sessionId}`).emit('sessionStatusChanged', {
-        sessionId,
-        status,
-        updatedBy: socket.user._id
-      });
-
-      console.log(`Session ${sessionId} status updated to ${status} by ${socket.user.name}`);
     });
 
     // Handle read receipts
@@ -274,10 +184,17 @@ const initializeSocket = (server) => {
         // Notify sender that messages were read
         const conversationRoom = getConversationRoomId(socket.user._id.toString(), sender.toString());
         io.to(conversationRoom).emit('messagesRead', {
-          by: socket.user._id
+          by: socket.user._id,
+          for: sender
         });
 
-        console.log(`Messages from ${sender} marked as read by ${socket.user.name}`);
+        // Also emit directly to the sender
+        io.to(sender).emit('messagesRead', {
+          by: socket.user._id,
+          for: sender
+        });
+
+        console.log(`Messages from ${sender} marked as read by ${socket.user._id}`);
       } catch (err) {
         console.error('Error marking messages as read:', err);
       }
@@ -287,9 +204,9 @@ const initializeSocket = (server) => {
     socket.on('disconnect', () => {
       console.log(`User disconnected: ${socket.user.name} (${socket.user._id})`);
       
-      // Clean up global socket reference
-      if (global.sockets && global.sockets[socket.user._id.toString()]) {
-        delete global.sockets[socket.user._id.toString()];
+      // Remove from active sockets
+      if (socket.user && socket.user._id) {
+        activeSockets.delete(socket.user._id.toString());
       }
 
       // Let everyone know this user is offline
@@ -302,11 +219,6 @@ const initializeSocket = (server) => {
     socket.on('error', (error) => {
       console.error(`Socket error for user ${socket.user?._id}: ${error.message}`);
     });
-  });
-
-  // Handle server-side errors
-  io.engine.on('connection_error', (err) => {
-    console.error('Connection error:', err);
   });
 
   return io;
